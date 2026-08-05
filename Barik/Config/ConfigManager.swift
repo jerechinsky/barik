@@ -7,9 +7,9 @@ final class ConfigManager: ObservableObject {
 
     @Published private(set) var config = Config()
     @Published private(set) var initError: String?
+    @Published private(set) var rawWidgetsConfig: [String: Any] = [:]
     
     private var fileWatchSource: DispatchSourceFileSystemObject?
-    private var fileDescriptor: CInt = -1
     private var configFilePath: String?
 
     private init() {
@@ -49,8 +49,18 @@ final class ConfigManager: ObservableObject {
             let content = try String(contentsOfFile: path, encoding: .utf8)
             let decoder = TOMLDecoder()
             let rootToml = try decoder.decode(RootToml.self, from: content)
-            DispatchQueue.main.async {
+            let rawTable = (try? TOMLDecoder.tomlTable(from: content)) ?? [:]
+            let rawWidgets = (rawTable["widgets"] as? [String: Any]) ?? [:]
+            let apply = {
                 self.config = Config(rootToml: rootToml)
+                self.rawWidgetsConfig = rawWidgets
+            }
+            // Set synchronously if already on main (during init) so values are
+            // available before the first SwiftUI render; otherwise dispatch.
+            if Thread.isMainThread {
+                apply()
+            } else {
+                DispatchQueue.main.async(execute: apply)
             }
         } catch {
             initError = "Error parsing TOML file: \(error.localizedDescription)"
@@ -66,12 +76,12 @@ final class ConfigManager: ObservableObject {
             # yabai.path = "/run/current-system/sw/bin/yabai"
             # aerospace.path = ...
             
-            theme = "system" # system, light, dark
-
+            theme = "dark" # system, light, dark, adaptive
             [widgets]
             displayed = [ # widgets on menu bar
                 "default.spaces",
                 "spacer",
+                "default.donotdisturb",
                 "default.network",
                 "default.battery",
                 "divider",
@@ -107,34 +117,43 @@ final class ConfigManager: ObservableObject {
     }
 
     private func startWatchingFile(at path: String) {
-        fileDescriptor = open(path, O_EVTONLY)
-        if fileDescriptor == -1 { return }
-        fileWatchSource = DispatchSource.makeFileSystemObjectSource(
-            fileDescriptor: fileDescriptor, eventMask: .write,
-            queue: DispatchQueue.global())
-        fileWatchSource?.setEventHandler { [weak self] in
-            guard let self = self, let path = self.configFilePath else {
-                return
+        fileWatchSource?.cancel()
+
+        let descriptor = open(path, O_EVTONLY)
+        guard descriptor != -1 else { return }
+
+        let source = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: descriptor,
+            eventMask: [.write, .rename, .delete],
+            queue: DispatchQueue.global()
+        )
+        source.setEventHandler { [weak self, weak source] in
+            guard let self, let source else { return }
+            let needsReattach = source.data.intersection([.rename, .delete]).isEmpty == false
+            DispatchQueue.main.async {
+                guard let path = self.configFilePath else { return }
+                self.parseConfigFile(at: path)
+                if needsReattach {
+                    self.startWatchingFile(at: path)
+                }
             }
-            self.parseConfigFile(at: path)
         }
-        fileWatchSource?.setCancelHandler { [weak self] in
-            if let fd = self?.fileDescriptor, fd != -1 {
-                close(fd)
-            }
+        source.setCancelHandler {
+            close(descriptor)
         }
-        fileWatchSource?.resume()
+        fileWatchSource = source
+        source.resume()
     }
 
-    func updateConfigValue(key: String, newValue: String) {
+    func updateConfigValue(key: String, newValue: String, quoted: Bool = true) {
         guard let path = configFilePath else {
             print("Config file path is not set")
             return
         }
         do {
             let currentText = try String(contentsOfFile: path, encoding: .utf8)
-            let updatedText = updatedTOMLString(
-                original: currentText, key: key, newValue: newValue)
+            let updatedText = Self.updatedTOMLString(
+                original: currentText, key: key, newValue: newValue, quoted: quoted)
             try updatedText.write(
                 toFile: path, atomically: false, encoding: .utf8)
             DispatchQueue.main.async {
@@ -145,9 +164,72 @@ final class ConfigManager: ObservableObject {
         }
     }
 
-    private func updatedTOMLString(
-        original: String, key: String, newValue: String
+    func updateDisplayedWidgets(_ items: [TomlWidgetItem]) {
+        guard let path = configFilePath else { return }
+        do {
+            let currentText = try String(contentsOfFile: path, encoding: .utf8)
+            let updatedText = replaceDisplayedArray(in: currentText, with: items)
+            try updatedText.write(toFile: path, atomically: true, encoding: .utf8)
+            parseConfigFile(at: path)
+            // Atomic writes replace the inode, so continue watching the new file.
+            startWatchingFile(at: path)
+        } catch {
+            print("Error updating displayed widgets:", error)
+        }
+    }
+
+    func openConfigFile() {
+        guard let configFilePath else { return }
+        NSWorkspace.shared.open(URL(fileURLWithPath: configFilePath))
+    }
+
+    private func replaceDisplayedArray(
+        in original: String,
+        with items: [TomlWidgetItem]
     ) -> String {
+        let lines = original.components(separatedBy: "\n")
+        var inWidgetsSection = false
+        var startIndex: Int?
+        var endIndex: Int?
+        var bracketDepth = 0
+
+        for (index, line) in lines.enumerated() {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("[") && trimmed.hasSuffix("]") {
+                if startIndex != nil { break }
+                inWidgetsSection = trimmed == "[widgets]"
+                continue
+            }
+
+            if startIndex == nil, inWidgetsSection,
+               trimmed.hasPrefix("displayed"), trimmed.contains("=") {
+                startIndex = index
+            }
+
+            guard startIndex != nil else { continue }
+            bracketDepth += line.reduce(into: 0) { depth, character in
+                if character == "[" { depth += 1 }
+                if character == "]" { depth -= 1 }
+            }
+            if bracketDepth == 0 {
+                endIndex = index
+                break
+            }
+        }
+
+        guard let startIndex, let endIndex else { return original }
+        var newLines = Array(lines[..<startIndex])
+        newLines.append("displayed = \(items.toTomlDisplayedArray())")
+        if endIndex + 1 < lines.count {
+            newLines.append(contentsOf: lines[(endIndex + 1)...])
+        }
+        return newLines.joined(separator: "\n")
+    }
+
+    private static func updatedTOMLString(
+        original: String, key: String, newValue: String, quoted: Bool
+    ) -> String {
+        let value = quoted ? "\"\(newValue)\"" : newValue
         if key.contains(".") {
             let components = key.split(separator: ".").map(String.init)
             guard components.count >= 2 else {
@@ -168,7 +250,7 @@ final class ConfigManager: ObservableObject {
                 let trimmed = line.trimmingCharacters(in: .whitespaces)
                 if trimmed.hasPrefix("[") && trimmed.hasSuffix("]") {
                     if insideTargetTable && !updatedKey {
-                        newLines.append("\(actualKey) = \"\(newValue)\"")
+                        newLines.append("\(actualKey) = \(value)")
                         updatedKey = true
                     }
                     if trimmed == tableHeader {
@@ -185,7 +267,7 @@ final class ConfigManager: ObservableObject {
                         if line.range(of: pattern, options: .regularExpression)
                             != nil
                         {
-                            newLines.append("\(actualKey) = \"\(newValue)\"")
+                            newLines.append("\(actualKey) = \(value)")
                             updatedKey = true
                             continue
                         }
@@ -195,13 +277,13 @@ final class ConfigManager: ObservableObject {
             }
 
             if foundTable && insideTargetTable && !updatedKey {
-                newLines.append("\(actualKey) = \"\(newValue)\"")
+                newLines.append("\(actualKey) = \(value)")
             }
 
             if !foundTable {
                 newLines.append("")
                 newLines.append("[\(tablePath)]")
-                newLines.append("\(actualKey) = \"\(newValue)\"")
+                newLines.append("\(actualKey) = \(value)")
             }
             return newLines.joined(separator: "\n")
         } else {
@@ -217,7 +299,7 @@ final class ConfigManager: ObservableObject {
                     if line.range(of: pattern, options: .regularExpression)
                         != nil
                     {
-                        newLines.append("\(key) = \"\(newValue)\"")
+                        newLines.append("\(key) = \(value)")
                         updatedAtLeastOnce = true
                         continue
                     }
@@ -225,10 +307,20 @@ final class ConfigManager: ObservableObject {
                 newLines.append(line)
             }
             if !updatedAtLeastOnce {
-                newLines.append("\(key) = \"\(newValue)\"")
+                newLines.append("\(key) = \(value)")
             }
             return newLines.joined(separator: "\n")
         }
+    }
+
+    func rawWidgetConfig(for widgetId: String) -> [String: Any] {
+        let keys = widgetId.split(separator: ".").map { String($0) }
+        var current: [String: Any] = rawWidgetsConfig
+        for key in keys {
+            guard let next = current[key] as? [String: Any] else { return [:] }
+            current = next
+        }
+        return current
     }
 
     func globalWidgetConfig(for widgetId: String) -> ConfigData {

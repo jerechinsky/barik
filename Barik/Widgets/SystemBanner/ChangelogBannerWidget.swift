@@ -1,12 +1,13 @@
 import SwiftUI
 
 struct ChangelogBannerWidget: View {
+    @Environment(\.colorScheme) private var colorScheme
     @State private var rect: CGRect = .zero
 
     var body: some View {
 
         Button(action: {
-            MenuBarPopup.show(rect: rect, id: "changelog") {
+            MenuBarPopup.show(rect: rect, id: "changelog", colorScheme: colorScheme) {
                 ChangelogPopup()
             }
         }) {

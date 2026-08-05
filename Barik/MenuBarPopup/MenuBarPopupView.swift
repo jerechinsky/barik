@@ -3,6 +3,7 @@ import SwiftUI
 struct MenuBarPopupView<Content: View>: View {
     let content: Content
     let isPreview: Bool
+    let colorScheme: ColorScheme
 
     @ObservedObject var configManager = ConfigManager.shared
     var foregroundHeight: CGFloat { configManager.config.experimental.foreground.resolveHeight() }
@@ -10,7 +11,6 @@ struct MenuBarPopupView<Content: View>: View {
     @State private var contentHeight: CGFloat = 0
     @State private var viewFrame: CGRect = .zero
     @State private var animationValue: Double = 0.01
-    private var animated: Bool { isShowAnimation || isHideAnimation }
     @State private var isShowAnimation = false
     @State private var isHideAnimation = false
 
@@ -21,9 +21,13 @@ struct MenuBarPopupView<Content: View>: View {
     private let willChangeContent = NotificationCenter.default.publisher(
         for: .willChangeContent)
 
-    init(isPreview: Bool = false, @ViewBuilder content: () -> Content) {
+    init(
+        isPreview: Bool = false, colorScheme: ColorScheme,
+        @ViewBuilder content: () -> Content
+    ) {
         self.content = content()
         self.isPreview = isPreview
+        self.colorScheme = colorScheme
         if isPreview {
             _animationValue = State(initialValue: 1.0)
         }
@@ -32,8 +36,27 @@ struct MenuBarPopupView<Content: View>: View {
     var body: some View {
         ZStack(alignment: .topTrailing) {
             content
-                .background(Color.black)
-                .cornerRadius(((1.0 - animationValue) * 1) + 40)
+                .background {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(configManager.config.experimental.background.blur)
+                        .opacity(0.9)
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .fill(.black.opacity(colorScheme == .light ? 0.14 : 0.08))
+                        }
+                }
+                .overlay {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .strokeBorder(
+                            LinearGradient(
+                                colors: [.white.opacity(0.35), .white.opacity(0.55)],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            ),
+                            lineWidth: 0.5
+                        )
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                 .padding(.top, foregroundHeight + 5)
                 .offset(x: computedOffset, y: computedYOffset)
                 .shadow(radius: 30)
@@ -108,13 +131,6 @@ struct MenuBarPopupView<Content: View>: View {
                         isHideAnimation = false
                     }
                 }
-                .animation(
-                    .smooth(duration: 0.3), value: animated ? 0 : computedOffset
-                )
-                .animation(
-                    .smooth(duration: 0.3),
-                    value: animated ? 0 : computedYOffset
-                )
         }
         .background(
             GeometryReader { geometry in
@@ -131,8 +147,8 @@ struct MenuBarPopupView<Content: View>: View {
                     }
             }
         )
-        .foregroundStyle(.white)
-        .preferredColorScheme(.dark)
+        .foregroundStyle(.primary)
+        .preferredColorScheme(colorScheme)
     }
 
     var computedOffset: CGFloat {

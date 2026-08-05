@@ -2,12 +2,13 @@ import SwiftUI
 
 struct BatteryWidget: View {
     @EnvironmentObject var configProvider: ConfigProvider
+    @Environment(\.colorScheme) private var colorScheme
     var config: ConfigData { configProvider.config }
     var showPercentage: Bool { config["show-percentage"]?.boolValue ?? true }
     var warningLevel: Int { config["warning-level"]?.intValue ?? 20 }
     var criticalLevel: Int { config["critical-level"]?.intValue ?? 10 }
 
-    @StateObject private var batteryManager = BatteryManager()
+    @ObservedObject private var batteryManager = BatteryManager.shared
     private var level: Int { batteryManager.batteryLevel }
     private var isCharging: Bool { batteryManager.isCharging }
     private var isPluggedIn: Bool { batteryManager.isPluggedIn }
@@ -15,7 +16,7 @@ struct BatteryWidget: View {
     @State private var rect: CGRect = CGRect()
 
     var body: some View {
-        ZStack {
+        if !isPluggedIn || level <= 75 {
             ZStack(alignment: .leading) {
                 BatteryBodyView(mask: false)
                     .opacity(showPercentage ? 0.3 : 0.4)
@@ -51,14 +52,15 @@ struct BatteryWidget: View {
                         }
                 }
             )
+            .experimentalConfiguration(cornerRadius: 15)
+            .frame(maxHeight: .infinity)
+            .background(.black.opacity(0.001))
+            .onTapGesture {
+                MenuBarPopup.show(rect: rect, id: "battery", colorScheme: colorScheme) {
+                    BatteryPopup()
+                }
+            }
         }
-        .experimentalConfiguration(cornerRadius: 15)
-        .frame(maxHeight: .infinity)
-        .background(.black.opacity(0.001))
-        .onTapGesture {
-            MenuBarPopup.show(rect: rect, id: "battery") { BatteryPopup() }
-        }
-
     }
 
     private var batteryTextColor: Color {
@@ -115,7 +117,7 @@ private struct BatteryText: View {
         .foregroundStyle(
             showPercentage ? .foregroundOutsideInvert : .foregroundOutside
         )
-        .fontWeight(.semibold)
+        .fontWeight(.medium)
         .transition(.blurReplace)
         .animation(.smooth, value: isCharging)
         .frame(width: 26, height: 15)

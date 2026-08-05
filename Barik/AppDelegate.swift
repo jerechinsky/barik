@@ -9,7 +9,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             showFatalConfigError(message: error)
             return
         }
-        
+
+        // Initialize sleep/wake manager to pause services during sleep
+        _ = SleepWakeManager.shared
+
         // Show "What's New" banner if the app version is outdated
         if !VersionChecker.isLatestVersion() {
             VersionChecker.updateVersionFile()
@@ -18,7 +21,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     name: Notification.Name("ShowWhatsNewBanner"), object: nil)
             }
         }
-        
+
         MenuBarPopup.setup()
         setupPanels()
 
@@ -29,13 +32,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             object: nil)
     }
 
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls {
+            guard let components = URLComponents(
+                url: url, resolvingAgainstBaseURL: false),
+                components.scheme == "barik",
+                components.host == "focus",
+                let task = components.queryItems?.first(where: { $0.name == "task" })?.value?
+                    .trimmingCharacters(in: .whitespacesAndNewlines),
+                !task.isEmpty,
+                let durationValue = components.queryItems?
+                    .first(where: { $0.name == "duration" })?.value,
+                let duration = TimeInterval(durationValue),
+                duration > 0,
+                duration <= 24 * 60 * 60
+            else { continue }
+
+            FocusTimerManager.shared.start(
+                name: String(task.prefix(200)), duration: duration)
+        }
+    }
+
     @objc private func screenParametersDidChange(_ notification: Notification) {
         setupPanels()
+        MenuBarPopup.updateFrame()
     }
 
     /// Configures and displays the background and menu bar panels.
     private func setupPanels() {
-        guard let screenFrame = NSScreen.main?.frame else { return }
+        let screenFrame = CGDisplayBounds(CGMainDisplayID())
         setupPanel(
             &backgroundPanel,
             frame: screenFrame,

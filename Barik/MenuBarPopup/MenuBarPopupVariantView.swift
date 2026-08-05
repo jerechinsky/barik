@@ -1,13 +1,14 @@
 import SwiftUI
 
 enum MenuBarPopupVariant: String, Equatable {
-    case box, vertical, horizontal, settings
+    case box, vertical, horizontal, dayView, settings
 }
 
 struct MenuBarPopupVariantView: View {
     private let box: AnyView?
     private let vertical: AnyView?
     private let horizontal: AnyView?
+    private let dayView: AnyView?
     private let settings: AnyView?
 
     var selectedVariant: MenuBarPopupVariant
@@ -22,6 +23,7 @@ struct MenuBarPopupVariantView: View {
         @ViewBuilder box: () -> some View = { EmptyView() },
         @ViewBuilder vertical: () -> some View = { EmptyView() },
         @ViewBuilder horizontal: () -> some View = { EmptyView() },
+        @ViewBuilder dayView: () -> some View = { EmptyView() },
         @ViewBuilder settings: () -> some View = { EmptyView() }
     ) {
         self.selectedVariant = selectedVariant
@@ -30,6 +32,7 @@ struct MenuBarPopupVariantView: View {
         let boxView = box()
         let verticalView = vertical()
         let horizontalView = horizontal()
+        let dayViewContent = dayView()
         let settingsView = settings()
 
         self.box = (boxView is EmptyView) ? nil : AnyView(boxView)
@@ -37,6 +40,8 @@ struct MenuBarPopupVariantView: View {
             (verticalView is EmptyView) ? nil : AnyView(verticalView)
         self.horizontal =
             (horizontalView is EmptyView) ? nil : AnyView(horizontalView)
+        self.dayView =
+            (dayViewContent is EmptyView) ? nil : AnyView(dayViewContent)
         self.settings =
             (settingsView is EmptyView) ? nil : AnyView(settingsView)
     }
@@ -62,6 +67,11 @@ struct MenuBarPopupVariantView: View {
                     variantButton(
                         variant: .horizontal,
                         systemImageName: "rectangle.inset.filled")
+                }
+                if dayView != nil {
+                    variantButton(
+                        variant: .dayView,
+                        systemImageName: "list.bullet.rectangle.portrait.fill")
                 }
                 if settings != nil {
                     variantButton(
@@ -89,6 +99,8 @@ struct MenuBarPopupVariantView: View {
             if let view = vertical { view }
         case .horizontal:
             if let view = horizontal { view }
+        case .dayView:
+            if let view = dayView { view }
         case .settings:
             if let view = settings { view }
         }
@@ -116,7 +128,7 @@ struct MenuBarPopupVariantView: View {
             }
         } label: {
             Image(systemName: systemImageName)
-                .foregroundColor(.white.opacity(0.5))
+                .foregroundStyle(.primary.opacity(0.5))
                 .frame(width: 13, height: 10)
         }
         .buttonStyle(HoverButtonStyle())
@@ -124,7 +136,7 @@ struct MenuBarPopupVariantView: View {
             Group {
                 if selectedVariant == variant {
                     RoundedRectangle(cornerRadius: 8)
-                        .stroke(Color.white.opacity(0.3), lineWidth: 1)
+                        .stroke(Color.primary.opacity(0.3), lineWidth: 1)
                         .opacity(1 - animationValue * 10)
                 }
             }

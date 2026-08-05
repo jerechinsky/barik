@@ -29,7 +29,19 @@ struct BackgroundView: View {
                         .id("black")
                 } else {
                     spacer(geometry)
-                        .background(configManager.config.experimental.background.blur)
+                        .background {
+                            Rectangle()
+                                .fill(configManager.config.experimental.background.blur)
+                                .opacity(0.7)
+                        }
+                        .overlay {
+                            VStack(spacing: 0) {
+                                Rectangle().frame(height: 0.5)
+                                Spacer()
+                                Rectangle().frame(height: 0.5)
+                            }
+                            .foregroundStyle(.white.opacity(0.55))
+                        }
                         .id("blur")
                 }
             }

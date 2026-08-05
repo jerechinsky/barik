@@ -1,34 +1,47 @@
 import Combine
 import Foundation
+import IOKit
 import IOKit.ps
 
-/// This class monitors the battery status.
+/// C-style callback invoked by IOKit when power source changes
+private func powerSourceChangedCallback(context: UnsafeMutableRawPointer?) {
+    guard let context = context else { return }
+    let manager = Unmanaged<BatteryManager>.fromOpaque(context).takeUnretainedValue()
+    DispatchQueue.main.async {
+        manager.updateBatteryStatus()
+    }
+}
+
+/// Event-driven battery status monitor using IOKit notifications.
+/// Uses zero resources when idle by only updating on actual battery state changes.
 class BatteryManager: ObservableObject {
+    static let shared = BatteryManager()
+
     @Published var batteryLevel: Int = 0
     @Published var isCharging: Bool = false
     @Published var isPluggedIn: Bool = false
-    private var timer: Timer?
 
-    init() {
-        startMonitoring()
-    }
+    private var runLoopSource: CFRunLoopSource?
 
-    deinit {
-        stopMonitoring()
-    }
-
-    private func startMonitoring() {
-        // Update every 1 second.
-        timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) {
-            [weak self] _ in
-            self?.updateBatteryStatus()
+    private init() {
+        // Register for IOKit power source change notifications
+        let context = Unmanaged.passUnretained(self).toOpaque()
+        if let loopSource = IOPSNotificationCreateRunLoopSource(
+            powerSourceChangedCallback,
+            context
+        )?.takeRetainedValue() {
+            self.runLoopSource = loopSource
+            CFRunLoopAddSource(CFRunLoopGetCurrent(), loopSource, .defaultMode)
         }
+
+        // Get initial battery state
         updateBatteryStatus()
     }
 
-    private func stopMonitoring() {
-        timer?.invalidate()
-        timer = nil
+    deinit {
+        if let runLoopSource = runLoopSource {
+            CFRunLoopRemoveSource(CFRunLoopGetCurrent(), runLoopSource, .defaultMode)
+        }
     }
 
     /// This method updates the battery level and charging state.

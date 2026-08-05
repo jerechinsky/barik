@@ -1,60 +1,44 @@
+import Carbon
 import SwiftUI
 
 private var panel: NSPanel?
 
-class HidingPanel: NSPanel, NSWindowDelegate {
+private func handleEscapeHotKey(
+    _ nextHandler: EventHandlerCallRef?,
+    _ event: EventRef?,
+    _ userData: UnsafeMutableRawPointer?
+) -> OSStatus {
+    MenuBarPopup.hide()
+    return noErr
+}
+
+class HidingPanel: NSPanel {
     var hideTimer: Timer?
 
     override var canBecomeKey: Bool {
         return true
     }
-
-    override init(
-        contentRect: NSRect,
-        styleMask style: NSWindow.StyleMask,
-        backing bufferingType: NSWindow.BackingStoreType,
-        defer flag: Bool
-    ) {
-        super.init(
-            contentRect: contentRect, styleMask: style, backing: bufferingType,
-            defer: flag)
-        self.delegate = self
-    }
-
-    func windowDidResignKey(_ notification: Notification) {
-        NotificationCenter.default.post(name: .willHideWindow, object: nil)
-        hideTimer = Timer.scheduledTimer(
-            withTimeInterval: TimeInterval(
-                Constants.menuBarPopupAnimationDurationInMilliseconds) / 1000.0,
-            repeats: false
-        ) { [weak self] _ in
-            self?.orderOut(nil)
-        }
-    }
 }
 
 class MenuBarPopup {
     static var lastContentIdentifier: String? = nil
+    private static var escapeHotKey: EventHotKeyRef?
+    private static var escapeHandler: EventHandlerRef?
 
     static func show<Content: View>(
-        rect: CGRect, id: String, @ViewBuilder content: @escaping () -> Content
+        rect: CGRect, id: String, colorScheme: ColorScheme,
+        @ViewBuilder content: @escaping () -> Content
     ) {
         guard let panel = panel else { return }
+        registerEscapeHotKey()
 
-        if panel.isKeyWindow, lastContentIdentifier == id {
-            NotificationCenter.default.post(name: .willHideWindow, object: nil)
-            let duration =
-                Double(Constants.menuBarPopupAnimationDurationInMilliseconds)
-                / 1000.0
-            DispatchQueue.main.asyncAfter(deadline: .now() + duration) {
-                panel.orderOut(nil)
-                lastContentIdentifier = nil
-            }
+        if panel.isVisible, lastContentIdentifier == id {
+            hide()
             return
         }
 
         let isContentChange =
-            panel.isKeyWindow
+            panel.isVisible
             && (lastContentIdentifier != nil && lastContentIdentifier != id)
         lastContentIdentifier = id
 
@@ -63,7 +47,7 @@ class MenuBarPopup {
             hidingPanel.hideTimer = nil
         }
 
-        if panel.isKeyWindow {
+        if panel.isVisible {
             NotificationCenter.default.post(
                 name: .willChangeContent, object: nil)
             let baseDuration =
@@ -74,7 +58,7 @@ class MenuBarPopup {
                 panel.contentView = NSHostingView(
                     rootView:
                         ZStack {
-                            MenuBarPopupView {
+                            MenuBarPopupView(colorScheme: colorScheme) {
                                 content()
                             }
                             .position(x: rect.midX)
@@ -92,7 +76,7 @@ class MenuBarPopup {
             panel.contentView = NSHostingView(
                 rootView:
                     ZStack {
-                        MenuBarPopupView {
+                        MenuBarPopupView(colorScheme: colorScheme) {
                             content()
                         }
                         .position(x: rect.midX)
@@ -108,16 +92,10 @@ class MenuBarPopup {
     }
 
     static func setup() {
-        guard let screen = NSScreen.main?.visibleFrame else { return }
-        let panelFrame = NSRect(
-            x: 0,
-            y: 0,
-            width: screen.size.width,
-            height: screen.size.height
-        )
+        guard let screenFrame = NSScreen.main?.frame else { return }
 
         let newPanel = HidingPanel(
-            contentRect: panelFrame,
+            contentRect: screenFrame,
             styleMask: [.nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -128,7 +106,61 @@ class MenuBarPopup {
         newPanel.backgroundColor = .clear
         newPanel.hasShadow = false
         newPanel.collectionBehavior = [.canJoinAllSpaces]
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.didResignKeyNotification,
+            object: newPanel,
+            queue: .main
+        ) { _ in MenuBarPopup.hide() }
 
         panel = newPanel
+        var eventType = EventTypeSpec(
+            eventClass: OSType(kEventClassKeyboard),
+            eventKind: UInt32(kEventHotKeyPressed)
+        )
+        InstallEventHandler(
+            GetApplicationEventTarget(),
+            handleEscapeHotKey,
+            1,
+            &eventType,
+            nil,
+            &escapeHandler
+        )
+    }
+
+    static func hide() {
+        guard let panel, panel.isVisible else { return }
+        if let hidingPanel = panel as? HidingPanel, hidingPanel.hideTimer != nil { return }
+        if let escapeHotKey {
+            UnregisterEventHotKey(escapeHotKey)
+            self.escapeHotKey = nil
+        }
+
+        NotificationCenter.default.post(name: .willHideWindow, object: nil)
+        let duration = TimeInterval(Constants.menuBarPopupAnimationDurationInMilliseconds) / 1000.0
+        let timer = Timer.scheduledTimer(withTimeInterval: duration, repeats: false) { _ in
+            panel.orderOut(nil)
+            lastContentIdentifier = nil
+        }
+        (panel as? HidingPanel)?.hideTimer = timer
+    }
+
+    private static func registerEscapeHotKey() {
+        guard escapeHotKey == nil else { return }
+        let status = RegisterEventHotKey(
+            UInt32(kVK_Escape),
+            0,
+            EventHotKeyID(signature: 0x4252_4B45, id: 1),
+            GetApplicationEventTarget(),
+            0,
+            &escapeHotKey
+        )
+        if status != noErr {
+            escapeHotKey = nil
+        }
+    }
+
+    static func updateFrame() {
+        guard let screenFrame = NSScreen.main?.frame else { return }
+        panel?.setFrame(screenFrame, display: true)
     }
 }

@@ -21,12 +21,13 @@ enum WifiSignalStrength: String {
 
 /// Unified view model for monitoring network and Wi‑Fi status.
 final class NetworkStatusViewModel: NSObject, ObservableObject,
-    CLLocationManagerDelegate
+    CLLocationManagerDelegate, CWEventDelegate
 {
 
-    // States for Wi‑Fi and Ethernet obtained via NWPathMonitor.
+    // Wi‑Fi comes from CoreWLAN; Ethernet and overall connectivity come from NWPathMonitor.
     @Published var wifiState: NetworkState = .disconnected
     @Published var ethernetState: NetworkState = .disconnected
+    @Published private(set) var hasNetworkConnection = false
 
     // Wi‑Fi details obtained via CoreWLAN.
     @Published var ssid: String = "Not connected"
@@ -49,11 +50,17 @@ final class NetworkStatusViewModel: NSObject, ObservableObject,
         }
     }
 
+    var shouldShowWiFiIcon: Bool {
+        wifiState != .notSupported && (wifiState != .disabled || !hasNetworkConnection)
+    }
+
     private let monitor = NWPathMonitor()
     private let monitorQueue = DispatchQueue(label: "NetworkMonitor")
 
     private var timer: Timer?
     private let locationManager = CLLocationManager()
+    private var wifiClient: CWWiFiClient?
+    private var sleepWakeObservers: [NSObjectProtocol] = []
 
     override init() {
         super.init()
@@ -61,11 +68,39 @@ final class NetworkStatusViewModel: NSObject, ObservableObject,
         locationManager.requestWhenInUseAuthorization()
         startNetworkMonitoring()
         startWiFiMonitoring()
+        observeSleepWake()
     }
 
     deinit {
         stopNetworkMonitoring()
         stopWiFiMonitoring()
+        removeSleepWakeObservers()
+    }
+
+    private func observeSleepWake() {
+        let sleepObserver = NotificationCenter.default.addObserver(
+            forName: SleepWakeManager.willSleepNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.timer?.invalidate()
+            self?.timer = nil
+        }
+
+        let wakeObserver = NotificationCenter.default.addObserver(
+            forName: SleepWakeManager.didWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.startWiFiMonitoring()
+        }
+
+        sleepWakeObservers.append(contentsOf: [sleepObserver, wakeObserver])
+    }
+
+    private func removeSleepWakeObservers() {
+        sleepWakeObservers.forEach { NotificationCenter.default.removeObserver($0) }
+        sleepWakeObservers.removeAll()
     }
 
     // MARK: — NWPathMonitor for overall network status.
@@ -74,25 +109,7 @@ final class NetworkStatusViewModel: NSObject, ObservableObject,
         monitor.pathUpdateHandler = { [weak self] path in
             guard let self = self else { return }
             DispatchQueue.main.async {
-                // Wi‑Fi
-                if path.availableInterfaces.contains(where: { $0.type == .wifi }
-                ) {
-                    if path.usesInterfaceType(.wifi) {
-                        switch path.status {
-                        case .satisfied:
-                            self.wifiState = .connected
-                        case .requiresConnection:
-                            self.wifiState = .connecting
-                        default:
-                            self.wifiState = .connectedWithoutInternet
-                        }
-                    } else {
-                        // If the Wi‑Fi interface is available but not in use – consider it enabled but not connected.
-                        self.wifiState = .disconnected
-                    }
-                } else {
-                    self.wifiState = .notSupported
-                }
+                self.hasNetworkConnection = path.status == .satisfied
 
                 // Ethernet
                 if path.availableInterfaces.contains(where: {
@@ -125,22 +142,64 @@ final class NetworkStatusViewModel: NSObject, ObservableObject,
     // MARK: — Updating Wi‑Fi information via CoreWLAN.
 
     private func startWiFiMonitoring() {
-        timer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) {
-            [weak self] _ in
-            self?.updateWiFiInfo()
+        stopWiFiMonitoring()
+        let client = CWWiFiClient.shared()
+        wifiClient = client
+        client.delegate = self
+        do {
+            try client.startMonitoringEvent(with: .powerDidChange)
+            try client.startMonitoringEvent(with: .ssidDidChange)
+            try client.startMonitoringEvent(with: .linkDidChange)
+        } catch {
+            print("NetworkStatusViewModel: Wi-Fi event monitoring failed: \(error)")
         }
+
         updateWiFiInfo()
+
+        // RSSI does not have a change notification, so sample only that value
+        // occasionally while connected instead of re-reading everything every 5s.
+        timer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) {
+            [weak self] _ in
+            self?.updateSignalStrength()
+        }
+        timer?.tolerance = 5
     }
 
     private func stopWiFiMonitoring() {
         timer?.invalidate()
         timer = nil
+        if let wifiClient {
+            try? wifiClient.stopMonitoringEvent(with: .powerDidChange)
+            try? wifiClient.stopMonitoringEvent(with: .ssidDidChange)
+            try? wifiClient.stopMonitoringEvent(with: .linkDidChange)
+            wifiClient.delegate = nil
+            self.wifiClient = nil
+        }
+    }
+
+    private func updateSignalStrength() {
+        guard wifiState == .connected || wifiState == .connectedWithoutInternet,
+              let interface = CWWiFiClient.shared().interface() else { return }
+        rssi = interface.rssiValue()
+        noise = interface.noiseMeasurement()
     }
 
     private func updateWiFiInfo() {
         let client = CWWiFiClient.shared()
         if let interface = client.interface() {
-            self.ssid = interface.ssid() ?? "Not connected"
+            guard interface.powerOn() else {
+                wifiState = .disabled
+                ssid = "No interface"
+                rssi = 0
+                noise = 0
+                channel = "N/A"
+                return
+            }
+
+            let isConnected = interface.interfaceMode() != .none
+            wifiState = isConnected ? .connected : .disconnected
+            self.ssid = interface.ssid()
+                ?? (isConnected ? "Connected network" : "Not connected")
             self.rssi = interface.rssiValue()
             self.noise = interface.noiseMeasurement()
             if let wlanChannel = interface.wlanChannel() {
@@ -162,11 +221,41 @@ final class NetworkStatusViewModel: NSObject, ObservableObject,
                 self.channel = "N/A"
             }
         } else {
-            // Interface not available – Wi‑Fi is off.
+            wifiState = .notSupported
             self.ssid = "No interface"
             self.rssi = 0
             self.noise = 0
             self.channel = "N/A"
+        }
+    }
+
+    func toggleWiFi() {
+        guard let interface = CWWiFiClient.shared().interface() else { return }
+        do {
+            try interface.setPower(!interface.powerOn())
+            updateWiFiInfo()
+        } catch {
+            print("NetworkStatusViewModel: Could not change Wi-Fi power: \(error)")
+        }
+    }
+
+    // MARK: — CWEventDelegate
+
+    func powerStateDidChangeForWiFiInterface(withName interfaceName: String) {
+        DispatchQueue.main.async { [weak self] in
+            self?.updateWiFiInfo()
+        }
+    }
+
+    func ssidDidChangeForWiFiInterface(withName interfaceName: String) {
+        DispatchQueue.main.async { [weak self] in
+            self?.updateWiFiInfo()
+        }
+    }
+
+    func linkDidChangeForWiFiInterface(withName interfaceName: String) {
+        DispatchQueue.main.async { [weak self] in
+            self?.updateWiFiInfo()
         }
     }
 

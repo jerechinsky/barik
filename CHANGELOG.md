@@ -1,5 +1,41 @@
 # Changelog
 
+## Fork Changes (this-fifo)
+
+### 2024-12-03
+
+- Added `default.iterm` widget - iTerm2 session tracker with live state indicators
+  - Shows active terminal sessions with command and working directory
+  - Fish shell integration for command start/end tracking
+  - Claude Code hooks for tool_use/waiting state visibility
+  - Visual indicators: blue (activity), orange (waiting for input), red (failure)
+  - Native macOS popover with session details
+
+### 2024-12-02
+
+- Added `default.caffeinate` widget - toggle sleep prevention using IOKit power assertions
+- Light theme support with proper color assets
+- Refined typography to match macOS system menu bar style (13pt, medium weight)
+- Adjusted spacing and padding for cleaner appearance
+- Rewrote README for personal fork
+
+### Previous fork additions
+
+- Added `default.system` widget - Apple logo that opens System Settings
+- Added `default.nextmeeting` widget - shows next calendar event with attendees/meeting links
+- Added `default.audiooutput` widget - audio output device selector
+- Floating windows support in spaces widget
+- Event-driven updates via Darwin notifications
+- Sleep/wake handling for background services
+- Scrolling text for long song titles in NowPlaying
+- Per-widget calendar configuration (`show-events` per TimeWidget)
+- Display-aware widget filtering and notch support
+- Exclusion of accessory apps from spaces widget
+
+---
+
+## Upstream Changelog
+
 ## 0.5.1
 
 > This release was supported by **ALinuxPerson** _(help with the appearance configuration, 1 issue)_, **bake** _(1 issue)_ and **Oery** _(1 issue)_

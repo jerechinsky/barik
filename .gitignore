@@ -214,4 +214,12 @@ xcuserdata/
 
 ####
 # UNKNOWN: recommended by others, but I can't discover what these files are
+
+# Local build and verification output
+.build/
+build-debug/
+.tmp/
+
+# Local AI tool permissions
+.claude/settings.local.json
 #

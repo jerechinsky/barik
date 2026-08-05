@@ -4,6 +4,7 @@ import SwiftUI
 
 struct NowPlayingWidget: View {
     @EnvironmentObject var configProvider: ConfigProvider
+    @Environment(\.colorScheme) private var colorScheme
     @ObservedObject var playingManager = NowPlayingManager.shared
 
     @State private var widgetFrame: CGRect = .zero
@@ -27,7 +28,9 @@ struct NowPlayingWidget: View {
                 // Visible content with fixed animated width.
                 VisibleNowPlayingContent(song: song, width: animatedWidth)
                     .onTapGesture {
-                        MenuBarPopup.show(rect: widgetFrame, id: "nowplaying") {
+                        MenuBarPopup.show(
+                            rect: widgetFrame, id: "nowplaying", colorScheme: colorScheme
+                        ) {
                             NowPlayingPopup(configProvider: configProvider)
                         }
                     }
@@ -125,23 +128,49 @@ struct AlbumArtView: View {
     let song: NowPlayingSong
 
     var body: some View {
-        ZStack {
-            FadeAnimatedCachedImage(
-                url: song.albumArtURL,
-                targetSize: CGSize(width: 20, height: 20)
-            )
-            .frame(width: 20, height: 20)
-            .clipShape(RoundedRectangle(cornerRadius: 4))
-            .scaleEffect(song.state == .paused ? 0.9 : 1)
-            .brightness(song.state == .paused ? -0.3 : 0)
+        AlbumArtContent(
+            artworkData: song.albumArtData,
+            title: song.title,
+            artist: song.artist,
+            isPaused: song.state == .paused
+        )
+    }
+}
 
-            if song.state == .paused {
+/// Separated artwork content that only updates when song changes, not position
+private struct AlbumArtContent: View, Equatable {
+    let artworkData: Data?
+    let title: String
+    let artist: String
+    let isPaused: Bool
+
+    static func == (lhs: AlbumArtContent, rhs: AlbumArtContent) -> Bool {
+        lhs.title == rhs.title && lhs.artist == rhs.artist && lhs.isPaused == rhs.isPaused
+    }
+
+    var body: some View {
+        ZStack {
+            if let artworkData = artworkData,
+               let nsImage = NSImage(data: artworkData) {
+                Image(nsImage: nsImage)
+                    .resizable()
+                    .frame(width: 20, height: 20)
+                    .clipShape(RoundedRectangle(cornerRadius: 4))
+                    .scaleEffect(isPaused ? 0.9 : 1)
+                    .brightness(isPaused ? -0.3 : 0)
+            } else {
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(Color.gray.opacity(0.3))
+                    .frame(width: 20, height: 20)
+            }
+
+            if isPaused {
                 Image(systemName: "pause.fill")
                     .foregroundColor(.icon)
                     .transition(.blurReplace)
             }
         }
-        .animation(.smooth(duration: 0.1), value: song.state == .paused)
+        .animation(.smooth(duration: 0.1), value: isPaused)
     }
 }
 
@@ -157,23 +186,139 @@ struct SongTextView: View {
 
         VStack(alignment: .leading, spacing: -1) {
             if foregroundHeight >= 30 {
-                Text(song.title)
-                    .font(.system(size: 11))
-                    .fontWeight(.medium)
+                ScrollingText(text: song.title, font: .system(size: 11), fontWeight: .medium)
                     .padding(.trailing, 2)
-                Text(song.artist)
-                    .opacity(0.8)
-                    .font(.system(size: 10))
+                ScrollingText(text: song.artist, font: .system(size: 10), opacity: 0.8)
                     .padding(.trailing, 2)
             } else {
-                Text(song.artist + " — " + song.title)
-                    .font(.system(size: 12))
+                ScrollingText(
+                    text: song.artist + " — " + song.title,
+                    font: .system(size: 12)
+                )
             }
         }
         // Disable animations for text changes.
         .transaction { transaction in
             transaction.animation = nil
         }
+    }
+}
+
+// MARK: - Scrolling Text View
+
+/// A view that scrolls text horizontally if it's too long to fit.
+struct ScrollingText: View {
+    let text: String
+    let font: Font
+    var fontWeight: Font.Weight = .regular
+    var opacity: Double = 1.0
+    var maxWidth: CGFloat = 150
+
+    @State private var offset: CGFloat = 0
+    @State private var textWidth: CGFloat = 0
+    @State private var shouldScroll: Bool = false
+    @State private var timer: Timer?
+
+    var body: some View {
+        ZStack(alignment: .leading) {
+            // Measure text width invisibly
+            Text(text)
+                .font(font)
+                .fontWeight(fontWeight)
+                .fixedSize()
+                .opacity(0)
+                .background(
+                    GeometryReader { geo in
+                        Color.clear
+                            .onAppear {
+                                updateScrolling(width: geo.size.width)
+                            }
+                            .onChange(of: geo.size.width) { _, newWidth in
+                                updateScrolling(width: newWidth)
+                            }
+                    }
+                )
+
+            // Display scrolling or static text
+            if shouldScroll {
+                HStack(spacing: 40) {
+                    Text(text)
+                        .font(font)
+                        .fontWeight(fontWeight)
+                    Text(text)
+                        .font(font)
+                        .fontWeight(fontWeight)
+                }
+                .fixedSize()
+                .offset(x: offset)
+                .frame(width: maxWidth, alignment: .leading)
+            } else {
+                Text(text)
+                    .font(font)
+                    .fontWeight(fontWeight)
+                    .lineLimit(1)
+                    .fixedSize()
+            }
+        }
+        .clipped()
+        .opacity(opacity)
+        .onChange(of: text) { _, _ in
+            stopScrolling()
+            offset = 0
+        }
+        .onDisappear {
+            stopScrolling()
+        }
+    }
+
+    private func updateScrolling(width: CGFloat) {
+        textWidth = width
+        let needsScroll = width > maxWidth
+
+        if needsScroll != shouldScroll {
+            shouldScroll = needsScroll
+            stopScrolling()
+
+            if shouldScroll {
+                offset = 0
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [self] in
+                    startScrolling()
+                }
+            }
+        }
+    }
+
+    private func startScrolling() {
+        guard shouldScroll else { return }
+
+        let scrollDistance = textWidth + 40
+        let pixelsPerSecond: CGFloat = 30.0
+        let duration = scrollDistance / pixelsPerSecond
+        let fps: CGFloat = 60.0
+        let frameInterval = 1.0 / fps
+        let pixelsPerFrame = pixelsPerSecond / fps
+
+        timer = Timer.scheduledTimer(withTimeInterval: frameInterval, repeats: true) { _ in
+            offset -= pixelsPerFrame
+
+            if offset <= -scrollDistance {
+                offset = 0
+            }
+        }
+    }
+
+    private func stopScrolling() {
+        timer?.invalidate()
+        timer = nil
+    }
+}
+
+// MARK: - Text Width Preference Key
+
+struct TextWidthPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
     }
 }
 

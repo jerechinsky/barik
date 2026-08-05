@@ -2,7 +2,7 @@ import SwiftUI
 
 /// Window displaying detailed network status information.
 struct NetworkPopup: View {
-    @StateObject private var viewModel = NetworkStatusViewModel()
+    @ObservedObject var viewModel: NetworkStatusViewModel
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -10,7 +10,7 @@ struct NetworkPopup: View {
                 HStack(spacing: 8) {
                     wifiIcon
                     Text(viewModel.ssid)
-                        .foregroundColor(.white)
+                        .foregroundStyle(.primary)
                         .font(.headline)
                 }
 
@@ -34,13 +34,12 @@ struct NetworkPopup: View {
                 HStack(spacing: 8) {
                     ethernetIcon
                     Text("Ethernet: \(viewModel.ethernetState.rawValue)")
-                        .foregroundColor(.white)
+                        .foregroundStyle(.primary)
                         .font(.headline)
                 }
             }
         }
         .padding(25)
-        .background(Color.black)
     }
 
     /// Chooses the Wi‑Fi icon based on the status and connection availability.
@@ -130,7 +129,7 @@ struct NetworkPopup: View {
 
 struct NetworkPopup_Previews: PreviewProvider {
     static var previews: some View {
-        NetworkPopup()
+        NetworkPopup(viewModel: NetworkStatusViewModel())
             .previewLayout(.sizeThatFits)
     }
 }

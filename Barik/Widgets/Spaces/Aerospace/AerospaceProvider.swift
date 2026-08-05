@@ -40,6 +40,10 @@ class AerospaceSpacesProvider: SpacesProvider, SwitchableSpacesProvider {
         return resultSpaces.filter { !$0.windows.isEmpty }
     }
 
+    func getFocusedSpaceId() -> String? {
+        return fetchFocusedSpace()?.id
+    }
+
     func focusSpace(spaceId: String, needWindowFocus: Bool) {
         _ = runAerospaceCommand(arguments: ["workspace", spaceId])
     }

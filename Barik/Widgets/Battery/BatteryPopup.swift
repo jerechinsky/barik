@@ -2,7 +2,7 @@ import EventKit
 import SwiftUI
 
 struct BatteryPopup: View {
-    @StateObject private var batteryManager = BatteryManager()
+    @ObservedObject private var batteryManager = BatteryManager.shared
 
     var body: some View {
         ZStack {
@@ -21,13 +21,13 @@ struct BatteryPopup: View {
                 .resizable()
                 .scaledToFit()
                 .padding(14)
-                .foregroundColor(.white)
+                .foregroundStyle(.primary)
             if batteryManager.isPluggedIn {
                 Image(
                     systemName: batteryManager.isCharging
                         ? "bolt.fill" : "powerplug.portrait.fill"
                 )
-                .foregroundColor(.white)
+                .foregroundStyle(.primary)
                 .offset(y: -30)
                 .shadow(color: Color.black, radius: 2, x: 0, y: 0)
                 .shadow(color: Color.black, radius: 2, x: 0, y: 0)
@@ -47,7 +47,7 @@ struct BatteryPopup: View {
             } else if batteryManager.batteryLevel <= 20 {
                 return .yellow
             } else {
-                return .white
+                return .primary
             }
         }
     }

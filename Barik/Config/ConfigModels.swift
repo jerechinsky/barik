@@ -7,12 +7,19 @@ struct RootToml: Decodable {
     var aerospace: AerospaceConfig?
     var experimental: ExperimentalConfig?
     var widgets: WidgetsSection
+    var builtinDisplay: BuiltinDisplayConfig?
 
     init() {
         self.theme = nil
         self.yabai = nil
         self.aerospace = nil
         self.widgets = WidgetsSection(displayed: [], others: [:])
+        self.builtinDisplay = nil
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case theme, yabai, aerospace, experimental, widgets
+        case builtinDisplay = "builtin-display"
     }
 }
 
@@ -24,19 +31,23 @@ struct Config {
     }
 
     var theme: String {
-        rootToml.theme ?? "light"
+        rootToml.theme ?? "dark"
     }
-    
+
     var yabai: YabaiConfig {
         rootToml.yabai ?? YabaiConfig()
     }
-    
+
     var aerospace: AerospaceConfig {
         rootToml.aerospace ?? AerospaceConfig()
     }
-    
+
     var experimental: ExperimentalConfig {
         rootToml.experimental ?? ExperimentalConfig()
+    }
+
+    var builtinDisplay: BuiltinDisplayConfig {
+        rootToml.builtinDisplay ?? BuiltinDisplayConfig()
     }
 }
 
@@ -83,15 +94,13 @@ struct WidgetsSection: Decodable {
         for key in container.allKeys {
             guard key.stringValue != "displayed" else { continue }
 
-            let nested = try container.nestedContainer(
-                keyedBy: DynamicKey.self, forKey: key)
-
-            var widgetDict = ConfigData()
-            for nestedKey in nested.allKeys {
-                let value = try nested.decode(TOMLValue.self, forKey: nestedKey)
-                widgetDict[nestedKey.stringValue] = value
+            // Decode the entire sub-tree as a TOMLValue in one shot.
+            // Using nestedContainer risks missing keys of implicit parent tables
+            // (e.g. [widgets.default] never explicitly declared, only its children are).
+            if let value = try? container.decode(TOMLValue.self, forKey: key),
+               let dict = value.dictionaryValue {
+                tempDict[key.stringValue] = dict
             }
-            tempDict[key.stringValue] = widgetDict
         }
 
         self.others = tempDict
@@ -99,30 +108,31 @@ struct WidgetsSection: Decodable {
 
     func config(for widgetId: String) -> ConfigData? {
         let keys = widgetId.split(separator: ".").map { String($0) }
+        guard let firstKey = keys.first,
+              let topLevel = others[firstKey] else { return nil }
 
-        var current: Any? = others
-
-        for key in keys {
-            guard let dict = current as? [String: Any] else {
-                return nil
-            }
-            current = dict[key]
+        var current: ConfigData = topLevel
+        for key in keys.dropFirst() {
+            guard let nested = current[key]?.dictionaryValue else { return nil }
+            current = nested
         }
-
-        return (current as? TOMLValue)?.dictionaryValue as? ConfigData
+        return current
     }
 }
 
-struct TomlWidgetItem: Decodable {
+struct TomlWidgetItem: Decodable, Equatable, Hashable {
+    let instanceID: UUID
     let id: String
     let inlineParams: ConfigData
 
     init(id: String, inlineParams: ConfigData) {
+        self.instanceID = UUID()
         self.id = id
         self.inlineParams = inlineParams
     }
 
     init(from decoder: Decoder) throws {
+        self.instanceID = UUID()
         let container = try decoder.singleValueContainer()
 
         if let strValue = try? container.decode(String.self) {
@@ -147,6 +157,34 @@ struct TomlWidgetItem: Decodable {
 
         self.id = widgetId
         self.inlineParams = params
+    }
+
+    static func == (lhs: TomlWidgetItem, rhs: TomlWidgetItem) -> Bool {
+        lhs.instanceID == rhs.instanceID
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(instanceID)
+    }
+
+    func toTomlString() -> String {
+        if inlineParams.isEmpty {
+            return "\"\(id.tomlEscaped)\""
+        }
+        let parameters = inlineParams
+            .sorted { $0.key < $1.key }
+            .map { key, value in
+                "\(key) = \(value.toTomlValueString())"
+            }
+            .joined(separator: ", ")
+        return "{ \"\(id.tomlEscaped)\" = { \(parameters) } }"
+    }
+}
+
+extension Array where Element == TomlWidgetItem {
+    func toTomlDisplayedArray() -> String {
+        let rows = map { "    \($0.toTomlString())" }.joined(separator: ",\n")
+        return "[\n\(rows)\n]"
     }
 }
 
@@ -202,6 +240,12 @@ extension TOMLValue {
         return nil
     }
 
+    var doubleValue: Double? {
+        if case let .double(d) = self { return d }
+        if case let .int(i) = self { return Double(i) }
+        return nil
+    }
+
     var boolValue: Bool? {
         if case let .bool(b) = self { return b }
         return nil
@@ -215,6 +259,35 @@ extension TOMLValue {
     var dictionaryValue: ConfigData? {
         if case let .dictionary(dict) = self { return dict }
         return nil
+    }
+
+    func toTomlValueString() -> String {
+        switch self {
+        case .string(let value):
+            return "\"\(value.tomlEscaped)\""
+        case .bool(let value):
+            return value ? "true" : "false"
+        case .int(let value):
+            return "\(value)"
+        case .double(let value):
+            return "\(value)"
+        case .array(let values):
+            return "[\(values.map { $0.toTomlValueString() }.joined(separator: ", "))]"
+        case .dictionary(let values):
+            let content = values.sorted { $0.key < $1.key }
+                .map { "\($0.key) = \($0.value.toTomlValueString())" }
+                .joined(separator: ", ")
+            return "{ \(content) }"
+        case .null:
+            return "\"\""
+        }
+    }
+}
+
+private extension String {
+    var tomlEscaped: String {
+        replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
     }
 }
 
@@ -243,6 +316,23 @@ struct AerospaceConfig: Decodable {
         } else {
             self.path = "/opt/homebrew/bin/aerospace"
         }
+    }
+}
+
+struct BuiltinDisplayConfig: Decodable {
+    let hiddenWidgets: [String]
+
+    init() {
+        self.hiddenWidgets = []
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        hiddenWidgets = try container.decodeIfPresent([String].self, forKey: .hiddenWidgets) ?? []
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case hiddenWidgets = "hidden-widgets"
     }
 }
 
@@ -446,4 +536,3 @@ enum BackgroundForegroundHeight: Decodable {
         )
     }
 }
-

@@ -4,14 +4,14 @@ import SwiftUI
 extension Theme {
     static let barik = Theme()
         .text {
-            ForegroundColor(.white.opacity(0.8))
+            ForegroundColor(.primary.opacity(0.8))
             BackgroundColor(.clear)
             FontSize(14)
         }
         .code {
             FontFamilyVariant(.monospaced)
             FontSize(.em(0.85))
-            BackgroundColor(.white.opacity(0.1))
+            BackgroundColor(.primary.opacity(0.1))
         }
         .codeBlock { configuration in
           ScrollView(.horizontal) {
@@ -24,13 +24,13 @@ extension Theme {
               }
               .padding(16)
           }
-          .background(.white.opacity(0.1))
+          .background(.primary.opacity(0.1))
           .clipShape(RoundedRectangle(cornerRadius: 6))
           .markdownMargin(top: 0, bottom: 16)
         }
         .strong {
             FontWeight(.semibold)
-            ForegroundColor(.white)
+            ForegroundColor(.primary)
         }
         .link {
             ForegroundColor(.blue)

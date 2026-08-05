@@ -1,178 +1,132 @@
-**NOTICE**: Unfortunately, I don’t have much free time to actively maintain this project. If you like the project but are not satisfied with its current state, you can explore the many forks or create your own. Even if you’re unfamiliar with **Swift**, tools like **Claude Code** and **Codex** can effectively help implement projects like this. This is a great opportunity to tailor **barik** to your needs and make it exactly the way you’d like.
+# Barik
 
-----
+A lightweight macOS menu bar replacement for use with [yabai](https://github.com/koekeishiya/yabai) or [AeroSpace](https://github.com/nikitabobko/AeroSpace).
 
-<p align="center" dir="auto">
-  <img src="resources/header-image.png" alt="Barik"">
-  <p align="center" dir="auto">
-    <a href="LICENSE">
-      <img alt="License Badge" src="https://img.shields.io/github/license/mocki-toki/barik.svg?color=green" style="max-width: 100%;">
-    </a>
-    <a href="https://github.com/mocki-toki/barik/issues">
-      <img alt="Issues Badge" src="https://img.shields.io/github/issues/mocki-toki/barik.svg?color=green" style="max-width: 100%;">
-    </a>
-    <a href="CHANGELOG.md">
-      <img alt="Changelog Badge" src="https://img.shields.io/badge/view-changelog-green.svg" style="max-width: 100%;">
-    </a>
-    <a href="https://github.com/mocki-toki/barik/releases">
-      <img alt="GitHub Downloads (all assets, all releases)" src="https://img.shields.io/github/downloads/mocki-toki/barik/total">
-    </a>
-  </p>
-</p>
+> **Note:** This is a personal fork of [mocki-toki/barik](https://github.com/mocki-toki/barik) tailored to my needs. Not accepting contributions. No promises of support or maintenance.
 
-**barik** is a lightweight macOS menu bar replacement. If you use [**yabai**](https://github.com/koekeishiya/yabai) or [**AeroSpace**](https://github.com/nikitabobko/AeroSpace) for tiling WM, you can display the current space in a sleek macOS-style panel with smooth animations. This makes it easy to see which number to press to switch spaces.
+## Features
 
-<br>
+### Widgets
 
-<div align="center">
-  <h3>Screenshots</h3>
-  <img src="resources/preview-image-light.png" alt="Barik Light Theme">
-  <img src="resources/preview-image-dark.png" alt="Barik Dark Theme">
-</div>
-<br>
-<div align="center">
-  <h3>Video</h3>
-  <video src="https://github.com/user-attachments/assets/33cfd2c2-e961-4d04-8012-664db0113d4f">
-</div>
-    
-https://github.com/user-attachments/assets/d3799e24-c077-4c6a-a7da-a1f2eee1a07f
+| Widget | Description |
+|--------|-------------|
+| `default.system` | Apple logo, Option-click toggles Do Not Disturb |
+| `default.spaces` | Current spaces with individual window icons |
+| `default.caffeinate` | Toggle sleep prevention (allows display sleep) |
+| `default.iterm` | iTerm2 session tracker with Claude Code integration |
+| `default.nextmeeting` | Shows next calendar event with attendees/meeting links |
+| `default.nowplaying` | Currently playing track with scrolling text |
+| `default.audiooutput` | Audio output device selector |
+| `default.tailscale` | Personal Tailscale home-subnet status and path overview |
+| `default.network` | Event-driven network status indicator |
+| `default.battery` | Battery level with percentage |
+| `default.weather` | Current conditions, temperature, and six-hour popup forecast |
+| `default.codexlimits` | Available Codex limit rings, nearest reset countdown, and percentages |
+| `default.codexactivity` | Black dots for running Codex tasks and green dots for completed unread tasks; hidden at zero |
+| `default.time` | Configurable clock with month and detailed agenda popups |
+| `divider` | Visual separator |
+| `spacer` | Flexible space |
 
-<br>
+### Improvements over upstream
 
-## Requirements
-
-- macOS 14.6+
-
-## Quick Start
-
-1. Install **barik** via [Homebrew](https://brew.sh/)
-
-```sh
-brew install --cask mocki-toki/formulae/barik
-```
-
-Or you can download from [Releases](https://github.com/mocki-toki/barik/releases), unzip it, and move it to your Applications folder.
-
-2. _(Optional)_ To display open applications and spaces, install [**yabai**](https://github.com/koekeishiya/yabai) or [**AeroSpace**](https://github.com/nikitabobko/AeroSpace) and set up hotkeys. For **yabai**, you'll need **skhd** or **Raycast scripts**. Don't forget to configure **top padding** — [here's an example for **yabai**](https://github.com/mocki-toki/barik/blob/main/example/.yabairc).
-
-3. Hide the system menu bar in **System Settings** and uncheck **Desktop & Dock → Show items → On Desktop**.
-
-4. Launch **barik** from the Applications folder.
-
-5. Add **barik** to your login items for automatic startup.
-
-**That's it!** Try switching spaces and see the panel in action.
+- Event-driven updates via Darwin notifications
+- Sleep/wake handling for background services
+- Per-widget calendar configuration
+- Light theme support with proper colors
+- Refined typography matching macOS system style
+- Drag-and-drop widget reordering, persisted to the config
+- Right-click menu for toggling widgets and opening the config
 
 ## Configuration
 
-When you launch **barik** for the first time, it will create a `~/.barik-config.toml` file with an example customization for your new menu bar.
+Config file: `~/.barik-config.toml`
 
 ```toml
-# If you installed yabai or aerospace without using Homebrew,
-# manually set the path to the binary. For example:
-#
-# yabai.path = "/run/current-system/sw/bin/yabai"
-# aerospace.path = ...
-
-theme = "system" # system, light, dark
+theme = "light" # system, light, dark
 
 [widgets]
-displayed = [ # widgets on menu bar
+displayed = [
+    "default.system",
+    "divider",
     "default.spaces",
+    "divider",
+    "default.caffeinate",
     "spacer",
+    "default.nextmeeting",
     "default.nowplaying",
+    "default.audiooutput",
+    "default.tailscale",
     "default.network",
+    "default.weather",
+    "default.codexlimits",
+    "default.codexactivity",
     "default.battery",
     "divider",
-    # { "default.time" = { time-zone = "America/Los_Angeles", format = "E d, hh:mm" } },
-    "default.time",
+    { "default.time" = { label = "PST", time-zone = "America/Los_Angeles", format = "hh:mm" } },
+    { "default.time" = { label = "BRT", time-zone = "America/Sao_Paulo", format = "hh:mm" } },
+    "divider",
+    { "default.time" = { format = "E d, jjmm" } },
 ]
 
 [widgets.default.spaces]
-space.show-key = true        # show space number (or character, if you use AeroSpace)
+space.show-key = true
 window.show-title = true
 window.title.max-length = 50
 
-# A list of applications that will always be displayed by application name.
-# Other applications will show the window title if there is more than one window.
-window.title.always-display-app-name-for = ["Mail", "Chrome", "Arc"]
-
-[widgets.default.nowplaying.popup]
-view-variant = "horizontal"
+[widgets.default.nextmeeting]
+max-title-length = 25
+only-meetings = true  # only events with attendees or meeting links
 
 [widgets.default.battery]
 show-percentage = true
 warning-level = 30
 critical-level = 10
 
-[widgets.default.time]
-format = "E d, J:mm"
-calendar.format = "J:mm"
+[widgets.default.codexlimits]
+refresh-interval-seconds = 15
+diameter = 18
+spacing = 8
+show-percentage = true
 
-calendar.show-events = true
-# calendar.allow-list = ["Home", "Personal"] # show only these calendars
-# calendar.deny-list = ["Work", "Boss"] # show all calendars except these
+[widgets.default.codexactivity]
+refresh-interval-seconds = 2
+stale-after-minutes = 30
+dot-diameter = 7
+dot-spacing = 4
+color = "#000000"
+unread-color = "#3D755D"
 
 [widgets.default.time.popup]
-view-variant = "box"
+view-variant = "dayView"
 
+# Authenticate once in Terminal with:
+# /Applications/Codex.app/Contents/Resources/codex login
+# Then run one Codex task so ~/.codex/sessions contains a usage snapshot.
 
+[experimental.background]
+displayed = true
+height = 35
+blur = 2
 
-### EXPERIMENTAL, WILL BE REPLACED BY STYLE API IN THE FUTURE
-[experimental.background] # settings for blurred background
-displayed = true          # display blurred background
-height = "default"        # available values: default (stretch to full screen), menu-bar (height like system menu bar), <float> (e.g., 40, 33.5)
-blur = 3                  # background type: from 1 to 6 for blur intensity, 7 for black color
-
-[experimental.foreground] # settings for menu bar
-height = "default"        # available values: default (55.0), menu-bar (height like system menu bar), <float> (e.g., 40, 33.5)
-horizontal-padding = 25   # padding on the left and right corners
-spacing = 15              # spacing between widgets
-
-[experimental.foreground.widgets-background] # settings for widgets background
-displayed = false                            # wrap widgets in their own background
-blur = 3                                     # background type: from 1 to 6 for blur intensity
+[experimental.foreground]
+height = 35
+horizontal-padding = 16
+spacing = 10
 ```
 
-Currently, you can customize the order of widgets (time, indicators, etc.) and adjust some of their settings. Soon, you’ll also be able to add custom widgets and completely change **barik**'s appearance—making it almost unrecognizable (hello, r/unixporn!).
+## Building
 
-## Future Plans
+Requires Xcode. Open `Barik.xcodeproj` and build, or:
 
-I'm not planning to stick to minimal functionality—exciting new features are coming soon! The roadmap includes full style customization, the ability to create custom widgets or extend existing ones, and a public **Store** where you can share your styles and widgets.
+```sh
+xcodebuild -scheme Barik -configuration Release build
+```
 
-Soon, you'll also be able to place widgets not just at the top, but at the bottom, left, and right as well. This means you can replace not only the menu bar but also the Dock! 🚀
+## Credits
 
-## What to do if the currently playing song is not displayed in the Now Playing widget?
-
-Unfortunately, macOS does not support access to its API that allows music control. Fortunately, there is a workaround using Apple Script or a service API, but this requires additional work to integrate each service. Currently, the Now Playing widget supports the following services:
-
-1. Spotify (requires the desktop application)
-2. Apple Music (requires the desktop application)
-
-Create an issue so we can add your favorite music service: https://github.com/mocki-toki/barik/issues/new
-
-## Where Are the Menu Items?
-
-[#5](https://github.com/mocki-toki/barik/issues/5), [#1](https://github.com/mocki-toki/barik/issues/1)
-
-Menu items (such as File, Edit, View, etc.) are not currently supported, but they are planned for future releases. However, you can use [Raycast](https://www.raycast.com/), which supports menu items through an interface similar to Spotlight. I personally use it with the `option + tab` shortcut, and it works very well.
-
-If you’re accustomed to using menu items from the system menu bar, simply move your mouse to the top of the screen to reveal the system menu bar, where they will be available.
-
-<img src="resources/raycast-menu-items.jpeg" alt="Raycast Menu Items">
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a PR.
+- [mocki-toki/barik](https://github.com/mocki-toki/barik) - Original project
+- [KeepingYouAwake](https://github.com/newmarcel/KeepingYouAwake) by Marcel Dierkes - Inspiration for caffeinate widget IOKit implementation
 
 ## License
 
 [MIT](LICENSE)
-
-## Trademarks
-
-Apple and macOS are trademarks of Apple Inc. This project is not connected to Apple Inc. and does not have their approval or support.
-
-## Stars
-
-[![Stargazers over time](https://starchart.cc/mocki-toki/barik.svg?variant=adaptive)](https://starchart.cc/mocki-toki/barik)
