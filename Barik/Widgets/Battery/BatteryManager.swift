@@ -21,6 +21,11 @@ class BatteryManager: ObservableObject {
     @Published var isCharging: Bool = false
     @Published var isPluggedIn: Bool = false
 
+    /// Show remaining battery on battery power, or progress while actively charging.
+    var shouldShowWidget: Bool {
+        !isPluggedIn || (isCharging && batteryLevel < 100)
+    }
+
     private var runLoopSource: CFRunLoopSource?
 
     private init() {

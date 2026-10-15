@@ -2,11 +2,15 @@ import AppKit
 import Darwin
 import Foundation
 
-class YabaiSpacesProvider: SpacesProvider, SwitchableSpacesProvider {
+class YabaiSpacesProvider: SpacesProvider, SwitchableSpacesProvider, MovableWindowsProvider {
     typealias SpaceType = YabaiSpace
     let executablePath = ConfigManager.shared.config.yabai.path
+    private let commandRunner: (([String]) -> Data?)?
+    private static let signalLock = NSLock()
+    private var nextSignalCheck = Date.distantPast
 
-    init() {
+    init(commandRunner: (([String]) -> Data?)? = nil) {
+        self.commandRunner = commandRunner
         #if DEBUG
         assert(Self.isDisplayableWindow(role: "AXWindow", subrole: "AXStandardWindow", isFloating: true))
         assert(Self.isDisplayableWindow(role: "AXWindow", subrole: "AXDialog", isFloating: false))
@@ -20,6 +24,7 @@ class YabaiSpacesProvider: SpacesProvider, SwitchableSpacesProvider {
     }
 
     private func runYabaiCommand(arguments: [String]) -> Data? {
+        if let commandRunner { return commandRunner(arguments) }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executablePath)
         process.arguments = arguments
@@ -75,12 +80,32 @@ class YabaiSpacesProvider: SpacesProvider, SwitchableSpacesProvider {
         return output
     }
 
-    func installFocusSignals() {
+    func installSignals(force: Bool = true) {
+        Self.signalLock.lock()
+        defer { Self.signalLock.unlock() }
+        guard force || Date() >= nextSignalCheck else { return }
+        nextSignalCheck = Date().addingTimeInterval(10)
+
+        struct Signal: Decodable {
+            let label: String
+            let event: String
+            let action: String
+        }
+        guard let data = runYabaiCommand(arguments: ["-m", "signal", "--list"]),
+              let installed = try? JSONDecoder().decode([Signal].self, from: data) else { return }
+
         for (label, event, action) in [
-            ("barik_space_changed", "space_changed", "/usr/bin/notifyutil -p com.barik.space_changed.$YABAI_SPACE_INDEX"),
-            ("barik_window_focused", "window_focused", "/usr/bin/notifyutil -p com.barik.window_focused.$YABAI_WINDOW_ID"),
+            ("barik_space_changed", "space_changed", "/usr/bin/notifyutil -z 0 -p com.barik.space_changed.$YABAI_SPACE_INDEX"),
+            ("barik_space_created", "space_created", "/usr/bin/notifyutil -z 0 -p com.barik.space_changed"),
+            ("barik_space_destroyed", "space_destroyed", "/usr/bin/notifyutil -z 0 -p com.barik.space_changed"),
+            ("barik_window_focused", "window_focused", "/usr/bin/notifyutil -z 0 -p com.barik.window_focused.$YABAI_WINDOW_ID"),
+            ("barik_window_created", "window_created", "/usr/bin/notifyutil -z 0 -p com.barik.window_changed"),
+            ("barik_window_destroyed", "window_destroyed", "/usr/bin/notifyutil -z 0 -p com.barik.window_changed"),
         ] {
-            _ = runYabaiCommand(arguments: ["-m", "signal", "--remove", label])
+            if let existing = installed.first(where: { $0.label == label }) {
+                guard existing.event != event || existing.action != action else { continue }
+                _ = runYabaiCommand(arguments: ["-m", "signal", "--remove", label])
+            }
             _ = runYabaiCommand(arguments: [
                 "-m", "signal", "--add", "label=\(label)", "event=\(event)", "action=\(action)",
             ])
@@ -145,6 +170,9 @@ class YabaiSpacesProvider: SpacesProvider, SwitchableSpacesProvider {
     }
 
     func getSpacesWithWindows() -> [YabaiSpace]? {
+        // Yabai loses signals when it restarts. Repair them from the existing
+        // background refresh path, with at most one signal query per 10 seconds.
+        installSignals(force: false)
         // Keep the command sequence on the caller's single background worker.
         // Blocking an outer global-queue job while scheduling nested jobs onto the
         // same pool can exhaust every dispatch worker when refreshes overlap.
@@ -242,5 +270,35 @@ class YabaiSpacesProvider: SpacesProvider, SwitchableSpacesProvider {
 
     func focusWindow(windowId: String) {
         _ = runYabaiCommand(arguments: ["-m", "window", "--focus", windowId])
+    }
+
+    func moveWindow(windowId: Int, toSpace: String) -> Bool {
+        runYabaiCommand(arguments: ["-m", "window", String(windowId), "--space", toSpace]) != nil
+    }
+
+    func arrangeWindow(_ id: Int, relativeTo target: Int, direction: String?, detachFirst: Bool) -> Bool {
+        if let direction {
+            guard ["west", "east", "north", "south"].contains(direction) else { return false }
+            if detachFirst {
+                // Yabai rejects warping between members of the same stack.
+                // Unmanage/remanage the source first, then place it explicitly.
+                guard runYabaiCommand(arguments: ["-m", "window", String(id), "--toggle", "float"]) != nil else { return false }
+                guard runYabaiCommand(arguments: ["-m", "window", String(id), "--toggle", "float"]) != nil else { return false }
+            }
+            // --insert toggles an existing identical direction off. Passing
+            // through stack first guarantees that the requested side is set.
+            guard runYabaiCommand(arguments: ["-m", "window", String(target), "--insert", "stack"]) != nil,
+                  runYabaiCommand(arguments: ["-m", "window", String(target), "--insert", direction]) != nil else { return false }
+            return runYabaiCommand(arguments: ["-m", "window", String(id), "--warp", String(target)]) != nil
+        }
+        return runYabaiCommand(arguments: ["-m", "window", String(target), "--stack", String(id)]) != nil
+    }
+
+    func swapWindows(_ first: Int, _ second: Int) -> Bool {
+        runYabaiCommand(arguments: ["-m", "window", String(first), "--swap", String(second)]) != nil
+    }
+
+    func closeWindow(windowId: String) {
+        _ = runYabaiCommand(arguments: ["-m", "window", "--close", windowId])
     }
 }

@@ -4,32 +4,45 @@ import SwiftUI
 private final class MinuteTicker: ObservableObject {
     @Published private(set) var currentTime = Date()
 
-    private var timer: DispatchSourceTimer?
+    private var timer: Timer?
+    private var observers: [NSObjectProtocol] = []
     private var formatters: [String: DateFormatter] = [:]
 
     init() {
-        let now = Date()
-        let nextMinute = Calendar.current.nextDate(
-            after: now,
-            matching: DateComponents(second: 0),
-            matchingPolicy: .nextTime
-        ) ?? now.addingTimeInterval(60)
-
-        let source = DispatchSource.makeTimerSource(queue: .main)
-        source.schedule(
-            deadline: .now() + max(0, nextMinute.timeIntervalSince(now)),
-            repeating: 60,
-            leeway: .milliseconds(500)
-        )
-        source.setEventHandler { [weak self] in
-            self?.currentTime = Date()
+        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+            self?.refresh()
         }
-        source.resume()
-        timer = source
+        timer.tolerance = 0.2
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
+
+        let notificationCenter = NotificationCenter.default
+        let refreshNotifications: [Notification.Name] = [
+            SleepWakeManager.didWakeNotification,
+            .NSSystemClockDidChange,
+            .NSSystemTimeZoneDidChange,
+            .NSCalendarDayChanged,
+        ]
+        observers = refreshNotifications.map { name in
+            notificationCenter.addObserver(
+                forName: name,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.refresh()
+            }
+        }
     }
 
     deinit {
-        timer?.cancel()
+        timer?.invalidate()
+        for observer in observers {
+            NotificationCenter.default.removeObserver(observer)
+        }
+    }
+
+    private func refresh() {
+        currentTime = Date()
     }
 
     func formatted(
@@ -57,6 +70,7 @@ private final class MinuteTicker: ObservableObject {
 struct TimeWidget: View {
     @EnvironmentObject var configProvider: ConfigProvider
     @Environment(\.colorScheme) private var colorScheme
+    @ObservedObject private var displayManager = DisplayManager.shared
     var config: ConfigData { configProvider.config }
     var calendarConfig: ConfigData? { config["calendar"]?.dictionaryValue }
 
@@ -75,7 +89,8 @@ struct TimeWidget: View {
         return calendarConfig?["show-events"]?.boolValue ?? true
     }
     var calendarMaxTitleLength: Int {
-        calendarConfig?["max-title-length"]?.intValue ?? 30
+        let configured = max(1, calendarConfig?["max-title-length"]?.intValue ?? 30)
+        return displayManager.isBuiltinDisplay ? min(8, configured) : min(24, configured)
     }
 
     @StateObject private var calendarManager: CalendarManager
@@ -95,14 +110,23 @@ struct TimeWidget: View {
                         .opacity(0.6)
                 }
                 Text(formattedTime(pattern: format, from: minuteTicker.currentTime))
-                    .fontWeight(.medium)
+                    .fixedSize(horizontal: true, vertical: false)
             }
+            .fontWeight(.medium)
             if let event = calendarManager.nextEvent, calendarShowEvents {
                 Text(eventText(for: event))
                     .opacity(0.8)
-                    .font(.subheadline)
+                    .font(.system(size: 10))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(width: min(displayManager.isBuiltinDisplay ? 100 : 160,
+                        ceil((eventText(for: event) as NSString).size(withAttributes: [
+                            .font: NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular)
+                        ]).width)), alignment: .trailing)
+                    .help(event.title ?? "")
             }
         }
+        .fixedSize(horizontal: true, vertical: false)
         .font(.system(size: 13))
         .foregroundStyle(.foregroundOutside)
         // .shadow(color: .foregroundShadowOutside, radius: 3)
@@ -144,7 +168,7 @@ struct TimeWidget: View {
     private func eventText(for event: EKEvent) -> String {
         var title = event.title ?? ""
         if title.count > calendarMaxTitleLength {
-            title = String(title.prefix(calendarMaxTitleLength)) + "..."
+            title = String(title.prefix(calendarMaxTitleLength)) + "…"
         }
         var text = title
         if !event.isAllDay {

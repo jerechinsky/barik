@@ -10,22 +10,27 @@ A lightweight macOS menu bar replacement for use with [yabai](https://github.com
 
 | Widget | Description |
 |--------|-------------|
-| `default.system` | Apple logo, Option-click toggles Do Not Disturb |
+| `default.system` | Apple logo; Option-click toggles Do Not Disturb, Command-click turns on closed-lid Keep Awake mode |
 | `default.spaces` | Current spaces with individual window icons |
-| `default.caffeinate` | Toggle sleep prevention (allows display sleep) |
+| `default.caffeinate` | Keep Awake toggle; Option-click toggles the idle mouse jiggler |
 | `default.iterm` | iTerm2 session tracker with Claude Code integration |
 | `default.nextmeeting` | Shows next calendar event with attendees/meeting links |
 | `default.nowplaying` | Currently playing track with scrolling text |
 | `default.audiooutput` | Audio output device selector |
-| `default.tailscale` | Personal Tailscale home-subnet status and path overview |
 | `default.network` | Event-driven network status indicator |
 | `default.battery` | Battery level with percentage |
 | `default.weather` | Current conditions, temperature, and six-hour popup forecast |
-| `default.codexlimits` | Available Codex limit rings, nearest reset countdown, and percentages |
-| `default.codexactivity` | Black dots for running Codex tasks and green dots for completed unread tasks; hidden at zero |
+| `default.codexlimits` | Codex weekly quota, daily pace budget, reset countdown, and selectable bar or pie style |
+| `default.codexactivity` | All running chats, with recent completions filling up to three dots; expands for additional running chats |
 | `default.time` | Configurable clock with month and detailed agenda popups |
 | `divider` | Visual separator |
 | `spacer` | Flexible space |
+
+Keep Awake uses the system-wide `pmset disablesleep` switch so it also covers a
+closed MacBook when an external display disconnects. The first state change asks
+for administrator approval to install a persistent current-user rule limited to
+the SHA-256-pinned `pmset disablesleep 0` and `1` commands. Later toggles do not
+prompt. Removing Barik does not remove that rule from `/private/etc/sudoers.d`.
 
 ### Improvements over upstream
 
@@ -55,7 +60,6 @@ displayed = [
     "default.nextmeeting",
     "default.nowplaying",
     "default.audiooutput",
-    "default.tailscale",
     "default.network",
     "default.weather",
     "default.codexlimits",
@@ -84,16 +88,23 @@ critical-level = 10
 
 [widgets.default.codexlimits]
 refresh-interval-seconds = 15
-diameter = 18
+style = "bar" # "bar", "pie", or "pie-number"
+bar-width = 64
+bar-height = 8
+pie-diameter = 21 # compact pie, aligned to the two-line quota label height
+diameter = 21 # legacy large pie used by "pie-number"
+today-color = "#35E875"
 spacing = 8
 show-percentage = true
 
 [widgets.default.codexactivity]
 refresh-interval-seconds = 2
-stale-after-minutes = 30
-dot-diameter = 7
+stale-after-minutes = 480 # Before 10:00, extends back to 17:00 the previous day
+show-read-completed = false
+dot-diameter = 8
 dot-spacing = 4
-color = "#000000"
+# All running chats are shown; recent completions fill up to three total dots.
+color = "#E59B3A"
 unread-color = "#3D755D"
 
 [widgets.default.time.popup]
@@ -130,3 +141,19 @@ xcodebuild -scheme Barik -configuration Release build
 ## License
 
 [MIT](LICENSE)
+
+### Mouse jiggler
+
+Option-click the coffee cup to toggle the mouse jiggler. A mouse icon appears next to the cup while enabled. After 30 seconds without input, it moves the pointer one point and back; it skips dragging, held modifiers, and locked sessions. Option-click again to stop just the jiggler, or click normally to turn off Keep Awake and the jiggler together. The jiggler starts off after every Barik restart.
+
+macOS may ask for Accessibility permission on first use. Allow Barik in System Settings > Privacy & Security > Accessibility, then Option-click again. Website session timeouts may still apply.
+
+For an explicit local launch with the jiggler enabled, quit Barik and run `open /Applications/Barik.app --args --mouse-jiggler`. Normal launches still start with the jiggler off. The running app reports its PID, permission state, and observed nudge count in `~/Library/Application Support/Barik/jiggler-status.json`; check the PID and timestamp before relying on that file.
+
+The Codex daily allowance uses the server's full weekly window (100% over seven
+24-hour days), reserving quota from the next local midnight until reset. Partial
+days are prorated and the reserve is rounded up. Savings carry forward; a negative
+`today` percentage means usage is ahead of that plan. The minus sits outside the
+number's layout, so it does not shift the digits. Resets before 06:00 belong to the
+preceding evening. The countdown includes remaining hours and the popup shows the
+exact local reset date, time, and timezone.

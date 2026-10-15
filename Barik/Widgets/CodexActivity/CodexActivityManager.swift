@@ -1,20 +1,27 @@
+import AppKit
 import Foundation
 import SwiftUI
+import SQLite3
 
 @MainActor
 final class CodexActivityManager: ObservableObject {
     static let shared = CodexActivityManager()
 
-    @Published private(set) var runningThreadIDs: [String] = []
-    @Published private(set) var unreadThreadIDs: [String] = []
+    @Published private(set) var runningActivities: [CodexActivity] = []
+    @Published private(set) var unreadActivities: [CodexActivity] = []
+    @Published private(set) var recentActivities: [CodexActivity] = []
     @Published private(set) var isRefreshing = false
 
-    var runningCount: Int { runningThreadIDs.count }
-    var unreadCount: Int { unreadThreadIDs.count }
+    var runningCount: Int { runningActivities.count }
+    var unreadCount: Int { unreadActivities.count }
+    var keepsReadCompletedVisible: Bool { showReadCompleted }
 
     private var refreshTimer: Timer?
     private var refreshInterval: TimeInterval = 2
-    private var staleAfter: TimeInterval = 30 * 60
+    private var staleAfter: TimeInterval = 8 * 60 * 60
+    private var showReadCompleted = false
+    private var recentActivityLookback: TimeInterval = 24 * 60 * 60
+    private var queuedLookbackRefresh = false
     private let scanner = CodexActivityScanner()
 
     private init() {
@@ -31,41 +38,101 @@ final class CodexActivityManager: ObservableObject {
 
     func startUpdating(config: ConfigData) {
         refreshInterval = max(
-            1,
+            5,
             TimeInterval(config["refresh-interval-seconds"]?.intValue ?? 2)
         )
         staleAfter = max(
             60,
-            TimeInterval(config["stale-after-minutes"]?.intValue ?? 30) * 60
+            TimeInterval(config["stale-after-minutes"]?.intValue ?? 480) * 60
         )
+        showReadCompleted = config["show-read-completed"]?.boolValue ?? false
         scheduleRefreshTimer()
         refresh()
     }
 
     func refresh() {
-        guard !isRefreshing else { return }
-        isRefreshing = true
-        let staleAfter = staleAfter
         let codexApp = NSRunningApplication.runningApplications(
             withBundleIdentifier: "com.openai.codex"
         ).first
         let codexProcessID = codexApp?.processIdentifier
+        guard !isRefreshing else { return }
+        isRefreshing = true
+        let staleAfter = staleAfter
+        let showReadCompleted = showReadCompleted
+        let recentActivityLookback = recentActivityLookback
         let isCodexFrontmost = codexApp?.isActive == true
 
         Task {
             let snapshot = await scanner.snapshot(
                 staleAfter: staleAfter,
+                showReadCompleted: showReadCompleted,
+                recentActivityLookback: recentActivityLookback,
                 codexProcessID: codexProcessID,
                 isCodexFrontmost: isCodexFrontmost
             )
-            self.runningThreadIDs = snapshot.runningThreadIDs
-            self.unreadThreadIDs = snapshot.unreadThreadIDs
+            if self.runningActivities != snapshot.runningActivities {
+                self.runningActivities = snapshot.runningActivities
+            }
+            if self.unreadActivities != snapshot.unreadActivities {
+                self.unreadActivities = snapshot.unreadActivities
+            }
+            if self.recentActivities != snapshot.recentActivities {
+                self.recentActivities = snapshot.recentActivities
+            }
             self.isRefreshing = false
+            if self.queuedLookbackRefresh {
+                self.queuedLookbackRefresh = false
+                self.refresh()
+            }
+        }
+    }
+
+    func setRecentActivityLookback(_ interval: TimeInterval) {
+        let bounded = min(7 * 24 * 60 * 60, max(8 * 60 * 60, interval))
+        guard abs(bounded - recentActivityLookback) > 1 else { return }
+        recentActivityLookback = bounded
+        if isRefreshing {
+            queuedLookbackRefresh = true
+        } else {
+            refresh()
         }
     }
 
     func dismissCompletedThread(_ threadID: String) {
-        unreadThreadIDs.removeAll { $0 == threadID }
+        recentActivities = recentActivities.map { activity in
+            guard activity.id == threadID, activity.isUnread else {
+                return activity
+            }
+            return CodexActivity(
+                id: activity.id,
+                title: activity.title,
+                startedAt: activity.startedAt,
+                completedAt: activity.completedAt,
+                consumedTokens: activity.consumedTokens,
+                isUnread: false,
+                isRunning: activity.isRunning,
+                lastUpdatedAt: activity.lastUpdatedAt
+            )
+        }
+        if showReadCompleted {
+            unreadActivities = unreadActivities.map { activity in
+                guard activity.id == threadID, activity.isUnread else {
+                    return activity
+                }
+                return CodexActivity(
+                    id: activity.id,
+                    title: activity.title,
+                    startedAt: activity.startedAt,
+                    completedAt: activity.completedAt,
+                    consumedTokens: activity.consumedTokens,
+                    isUnread: false,
+                    isRunning: activity.isRunning,
+                    lastUpdatedAt: activity.lastUpdatedAt
+                )
+            }
+        } else {
+            unreadActivities.removeAll { $0.id == threadID }
+        }
         Task {
             await scanner.dismissCompletedThread(threadID)
         }
@@ -86,13 +153,19 @@ final class CodexActivityManager: ObservableObject {
 }
 
 private struct CodexActivitySnapshot {
-    let runningThreadIDs: [String]
-    let unreadThreadIDs: [String]
+    let runningActivities: [CodexActivity]
+    let unreadActivities: [CodexActivity]
+    let recentActivities: [CodexActivity]
 }
 
 private actor CodexActivityScanner {
     private static let dismissedThreadIDsKey =
         "codex-activity-dismissed-thread-ids"
+    // Keep lifecycle detection identical to the Raycast session manager.
+    // A bounded tail avoids rereading very large active session logs.
+    private static let maximumLifecycleTailBytes: UInt64 = 512 * 1_024
+    private static let maximumTrackerLookback: TimeInterval =
+        7 * 24 * 60 * 60
 
     private enum Lifecycle {
         case started
@@ -103,8 +176,25 @@ private actor CodexActivityScanner {
         var offset: UInt64
         var pendingData = Data()
         var lifecycle: Lifecycle
+        var startedAt: Date?
+        var completedAt: Date?
+        var consumedTokens: Int?
+        var fallbackTitle: String?
         var modifiedAt: Date
         let threadID: String
+    }
+
+    private struct ActivityUpdate {
+        var lifecycle: Lifecycle?
+        var startedAt: Date?
+        var completedAt: Date?
+        var consumedTokens: Int?
+        var fallbackTitle: String?
+    }
+
+    private struct ThreadMetadata {
+        let title: String
+        let updatedAt: Date?
     }
 
     private struct ActivityLogState {
@@ -117,7 +207,7 @@ private actor CodexActivityScanner {
     private var activeThreadIDs = Set<String>()
     private var activityLogProcessID: pid_t?
     private var lastUnreadThreadIDs = Set<String>()
-    private var visibleThreadIDs = Set<String>()
+    private var visibleThreads: [String: ThreadMetadata] = [:]
     private var visibleThreadIndexModifiedAt: Date?
     private var dismissedThreadIDs: Set<String>
 
@@ -146,6 +236,8 @@ private actor CodexActivityScanner {
 
     func snapshot(
         staleAfter: TimeInterval,
+        showReadCompleted: Bool,
+        recentActivityLookback: TimeInterval,
         codexProcessID: pid_t?,
         isCodexFrontmost: Bool
     ) -> CodexActivitySnapshot {
@@ -154,9 +246,25 @@ private actor CodexActivityScanner {
         let sessionsURL = homeURL
             .appendingPathComponent(".codex/sessions", isDirectory: true)
         let now = Date()
-        let recentCutoff = now.addingTimeInterval(-staleAfter)
+        let recentCutoff = Self.recentCutoff(
+            now: now,
+            ordinaryLookback: staleAfter
+        )
+        let trackerLookback = min(
+            Self.maximumTrackerLookback,
+            max(24 * 60 * 60, recentActivityLookback)
+        )
+        let trackerCutoff = now.addingTimeInterval(-trackerLookback)
+        let lookbackDays = max(
+            1,
+            Int(ceil(trackerLookback / (24 * 60 * 60)))
+        )
 
-        let candidates = Self.sessionDirectories(around: now, under: sessionsURL)
+        let directoryCandidates = Self.sessionDirectories(
+            around: now,
+            under: sessionsURL,
+            lookbackDays: lookbackDays
+        )
             .flatMap { directory in
                 (try? fileManager.contentsOfDirectory(
                     at: directory,
@@ -168,6 +276,11 @@ private actor CodexActivityScanner {
                     options: [.skipsHiddenFiles]
                 )) ?? []
             }
+        let databaseCandidates = Self.recentRolloutURLsFromThreadDatabase(
+            under: homeURL,
+            updatedAfter: trackerCutoff
+        )
+        let candidates = Array(Set(directoryCandidates + databaseCandidates))
 
         var currentPaths = Set<String>()
         for url in candidates where url.pathExtension == "jsonl" {
@@ -178,7 +291,7 @@ private actor CodexActivityScanner {
             ]),
             values.isRegularFile == true,
             let modifiedAt = values.contentModificationDate,
-            modifiedAt >= recentCutoff,
+            modifiedAt >= trackerCutoff,
             let fileSize = values.fileSize else {
                 continue
             }
@@ -188,10 +301,14 @@ private actor CodexActivityScanner {
             currentPaths.insert(path)
 
             if var state = states[path], size >= state.offset {
-                if size > state.offset {
-                    Self.ingestAppendedData(from: url, into: &state)
+                if size > state.offset || modifiedAt != state.modifiedAt {
+                    Self.refreshStateFromLifecycleTail(
+                        from: url,
+                        fileSize: size,
+                        modifiedAt: modifiedAt,
+                        state: &state
+                    )
                 }
-                state.modifiedAt = modifiedAt
                 states[path] = state
             } else if let state = Self.initialState(
                 for: url,
@@ -203,8 +320,14 @@ private actor CodexActivityScanner {
         }
 
         states = states.filter { currentPaths.contains($0.key) }
-        let runningThreadIDs = Set(states.values.filter {
-            $0.lifecycle == .started && $0.modifiedAt >= recentCutoff
+        let trackerStates = states.values.filter {
+            $0.modifiedAt >= trackerCutoff
+        }
+        let recentStates = trackerStates.filter {
+            $0.modifiedAt >= recentCutoff
+        }
+        let runningThreadIDs = Set(recentStates.filter {
+            $0.lifecycle == .started
         }.map(\.threadID))
         let codexUnreadThreadIDs = loadUnreadThreadIDs(under: homeURL)
         let openedThreadIDs = loadOpenedThreadIDs(
@@ -221,14 +344,125 @@ private actor CodexActivityScanner {
         if dismissedThreadIDs != previousDismissedThreadIDs {
             saveDismissedThreadIDs()
         }
+        var latestStateByThreadID: [String: FileState] = [:]
+        for state in trackerStates {
+            if let current = latestStateByThreadID[state.threadID],
+               current.modifiedAt >= state.modifiedAt {
+                continue
+            }
+            latestStateByThreadID[state.threadID] = state
+        }
+
         let unreadThreadIDs = codexUnreadThreadIDs
             .subtracting(runningThreadIDs)
             .subtracting(dismissedThreadIDs)
+        let recentCompletedThreadIDs = Set(recentStates.filter {
+            $0.lifecycle == .stopped
+        }.map(\.threadID))
+            .intersection(Set(visibleThreads.keys))
+            .subtracting(runningThreadIDs)
+        let completedThreadIDs = showReadCompleted
+            ? recentCompletedThreadIDs
+            : unreadThreadIDs
+
+        let runningActivities = runningThreadIDs.map { threadID in
+            let state = latestStateByThreadID[threadID]
+            return CodexActivity(
+                id: threadID,
+                title: title(
+                    for: threadID,
+                    fallbackTitle: state?.fallbackTitle
+                ),
+                startedAt: state?.startedAt,
+                completedAt: nil,
+                consumedTokens: state?.consumedTokens,
+                isUnread: false,
+                isRunning: true,
+                lastUpdatedAt: state?.modifiedAt ?? now
+            )
+        }.sorted { left, right in
+            let leftDate = latestStateByThreadID[left.id]?.modifiedAt
+                ?? .distantPast
+            let rightDate = latestStateByThreadID[right.id]?.modifiedAt
+                ?? .distantPast
+            return leftDate > rightDate
+        }
+
+        let unreadActivities = completedThreadIDs.map { threadID in
+            let state = latestStateByThreadID[threadID]
+            return CodexActivity(
+                id: threadID,
+                title: title(
+                    for: threadID,
+                    fallbackTitle: state?.fallbackTitle
+                ),
+                startedAt: state?.startedAt,
+                completedAt: state?.completedAt
+                    ?? visibleThreads[threadID]?.updatedAt,
+                consumedTokens: state?.consumedTokens,
+                isUnread: unreadThreadIDs.contains(threadID),
+                isRunning: false,
+                lastUpdatedAt: state?.modifiedAt ?? now
+            )
+        }.sorted {
+            // Oldest to newest keeps a newly completed task beside the running
+            // group instead of making it jump to the far left.
+            ($0.completedAt ?? .distantPast) < ($1.completedAt ?? .distantPast)
+        }
+
+        let recentActivities = latestStateByThreadID.values
+            .filter {
+                $0.lifecycle == .started
+                    || visibleThreads[$0.threadID] != nil
+            }
+            .map { state in
+                CodexActivity(
+                    id: state.threadID,
+                    title: title(
+                        for: state.threadID,
+                        fallbackTitle: state.fallbackTitle
+                    ),
+                    startedAt: state.startedAt,
+                    completedAt: state.completedAt
+                        ?? (state.lifecycle == .stopped
+                            ? visibleThreads[state.threadID]?.updatedAt
+                            : nil),
+                    consumedTokens: state.consumedTokens,
+                    isUnread: state.lifecycle == .stopped
+                        && codexUnreadThreadIDs.contains(state.threadID),
+                    isRunning: state.lifecycle == .started,
+                    lastUpdatedAt: state.modifiedAt
+                )
+            }
+            .sorted { left, right in
+                if left.isRunning != right.isRunning {
+                    return left.isRunning
+                }
+                return left.lastUpdatedAt > right.lastUpdatedAt
+            }
 
         return CodexActivitySnapshot(
-            runningThreadIDs: runningThreadIDs.sorted(),
-            unreadThreadIDs: unreadThreadIDs.sorted()
+            runningActivities: runningActivities,
+            unreadActivities: unreadActivities,
+            recentActivities: recentActivities
         )
+    }
+
+    private func title(
+        for threadID: String,
+        fallbackTitle: String? = nil
+    ) -> String {
+        let indexedTitle = visibleThreads[threadID]?.title
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let indexedTitle, !indexedTitle.isEmpty {
+            return indexedTitle
+        }
+        if let fallbackTitle = fallbackTitle?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !fallbackTitle.isEmpty {
+            return fallbackTitle
+        }
+        return "Untitled Codex task"
     }
 
     private func saveDismissedThreadIDs() {
@@ -243,56 +477,80 @@ private actor CodexActivityScanner {
         fileSize: UInt64,
         modifiedAt: Date
     ) -> FileState? {
-        guard let threadID = desktopRootThreadID(in: url),
-              let data = tailData(of: url, maximumBytes: 4 * 1_024 * 1_024)
+        guard let headData = headData(of: url, maximumBytes: 256 * 1_024),
+              let threadID = desktopRootThreadID(in: headData),
+              let data = tailData(
+                of: url,
+                maximumBytes: maximumLifecycleTailBytes
+              )
         else { return nil }
 
         // A busy active turn can push task_started beyond the tail window.
         // Completed turns always append a terminal lifecycle event at the end.
-        let lifecycle = lastLifecycle(in: data)
-            ?? (fileSize > 4 * 1_024 * 1_024 ? .started : .stopped)
+        let update = lastActivityUpdate(in: data)
+        let lifecycle = update.lifecycle
+            ?? (fileSize > maximumLifecycleTailBytes ? .started : .stopped)
 
         return FileState(
             offset: fileSize,
             lifecycle: lifecycle,
+            startedAt: update.startedAt,
+            completedAt: update.completedAt,
+            consumedTokens: update.consumedTokens,
+            fallbackTitle: firstUserRequestTitle(in: headData)
+                ?? update.fallbackTitle,
             modifiedAt: modifiedAt,
             threadID: threadID
         )
     }
 
-    private static func ingestAppendedData(
+    private static func refreshStateFromLifecycleTail(
         from url: URL,
-        into state: inout FileState
+        fileSize: UInt64,
+        modifiedAt: Date,
+        state: inout FileState
     ) {
-        guard let handle = try? FileHandle(forReadingFrom: url) else { return }
-        defer { handle.closeFile() }
+        guard let data = tailData(
+            of: url,
+            maximumBytes: maximumLifecycleTailBytes
+        ) else { return }
 
-        handle.seek(toFileOffset: state.offset)
-        let appended = handle.readDataToEndOfFile()
-        state.offset += UInt64(appended.count)
-
-        var data = state.pendingData
-        data.append(appended)
-        guard let newline = data.lastIndex(of: 0x0A) else {
-            state.pendingData = data
-            return
-        }
-
-        let completeLines = Data(data[...newline])
-        let remainderStart = data.index(after: newline)
-        state.pendingData = Data(data[remainderStart...])
-        if let lifecycle = lastLifecycle(in: completeLines) {
+        let update = lastActivityUpdate(in: data)
+        let lifecycle = update.lifecycle
+            ?? (fileSize > maximumLifecycleTailBytes ? .started : nil)
+        if let lifecycle {
             state.lifecycle = lifecycle
+            switch lifecycle {
+            case .started:
+                state.startedAt = update.startedAt ?? state.startedAt
+                state.completedAt = nil
+            case .stopped:
+                state.startedAt = update.startedAt ?? state.startedAt
+                state.completedAt = update.completedAt ?? state.completedAt
+            }
         }
+        if let consumedTokens = update.consumedTokens {
+            state.consumedTokens = consumedTokens
+        }
+        if state.fallbackTitle == nil,
+           let fallbackTitle = update.fallbackTitle {
+            state.fallbackTitle = fallbackTitle
+        }
+        state.offset = fileSize
+        state.pendingData.removeAll(keepingCapacity: false)
+        state.modifiedAt = modifiedAt
     }
 
     private static func sessionDirectories(
         around date: Date,
-        under sessionsURL: URL
+        under sessionsURL: URL,
+        lookbackDays: Int = 1
     ) -> [URL] {
         let calendar = Calendar.current
-        return [date, calendar.date(byAdding: .day, value: -1, to: date)]
-            .compactMap { $0 }
+        return (0...max(0, lookbackDays))
+            .compactMap {
+                calendar.date(byAdding: .day, value: -$0, to: date)
+            }
             .map { candidate in
                 let parts = calendar.dateComponents(
                     [.year, .month, .day],
@@ -314,8 +572,89 @@ private actor CodexActivityScanner {
             }
     }
 
-    private static func desktopRootThreadID(in url: URL) -> String? {
-        guard let event = firstJSONEvent(in: url),
+    private static func recentRolloutURLsFromThreadDatabase(
+        under homeURL: URL,
+        updatedAfter: Date
+    ) -> [URL] {
+        let databaseURL = homeURL
+            .appendingPathComponent(".codex/state_5.sqlite")
+        var database: OpaquePointer?
+        guard sqlite3_open_v2(
+            databaseURL.path,
+            &database,
+            SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX,
+            nil
+        ) == SQLITE_OK, let database else {
+            if database != nil {
+                sqlite3_close(database)
+            }
+            return []
+        }
+        defer { sqlite3_close(database) }
+
+        let query = """
+            SELECT rollout_path
+            FROM threads
+            WHERE COALESCE(updated_at_ms, updated_at * 1000) >= ?
+              AND rollout_path IS NOT NULL
+              AND rollout_path != ''
+            ORDER BY COALESCE(updated_at_ms, updated_at * 1000) DESC
+            LIMIT 512
+            """
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(
+            database,
+            query,
+            -1,
+            &statement,
+            nil
+        ) == SQLITE_OK, let statement else {
+            return []
+        }
+        defer { sqlite3_finalize(statement) }
+
+        let cutoffMilliseconds = Int64(
+            updatedAfter.timeIntervalSince1970 * 1_000
+        )
+        sqlite3_bind_int64(statement, 1, cutoffMilliseconds)
+
+        var urls: [URL] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let pathCString = sqlite3_column_text(statement, 0) else {
+                continue
+            }
+            urls.append(URL(fileURLWithPath: String(cString: pathCString)))
+        }
+        return urls
+    }
+
+    private static func recentCutoff(
+        now: Date,
+        ordinaryLookback: TimeInterval,
+        calendar: Calendar = .current
+    ) -> Date {
+        let ordinaryCutoff = now.addingTimeInterval(-ordinaryLookback)
+        guard calendar.component(.hour, from: now) < 10,
+              let startOfToday = calendar.dateInterval(of: .day, for: now)?.start,
+              let previousDay = calendar.date(
+                byAdding: .day,
+                value: -1,
+                to: startOfToday
+              ),
+              let previousEvening = calendar.date(
+                bySettingHour: 17,
+                minute: 0,
+                second: 0,
+                of: previousDay
+              ) else {
+            return ordinaryCutoff
+        }
+
+        return min(ordinaryCutoff, previousEvening)
+    }
+
+    private static func desktopRootThreadID(in data: Data) -> String? {
+        guard let event = firstJSONEvent(in: data),
               event["type"] as? String == "session_meta",
               let payload = event["payload"] as? [String: Any],
               let source = payload["source"] as? String,
@@ -351,7 +690,7 @@ private actor CodexActivityScanner {
         // Codex can leave internal sub-agent IDs in the unread atom. The
         // session index contains only user-visible tasks, so intersecting the
         // two avoids permanent dots for chats the user cannot open or read.
-        lastUnreadThreadIDs = localUnread.intersection(visibleThreadIDs)
+        lastUnreadThreadIDs = localUnread.intersection(Set(visibleThreads.keys))
         return lastUnreadThreadIDs
     }
 
@@ -361,7 +700,7 @@ private actor CodexActivityScanner {
             forKeys: [.contentModificationDateKey]
         ).contentModificationDate
 
-        if modifiedAt == visibleThreadIndexModifiedAt, !visibleThreadIDs.isEmpty {
+        if modifiedAt == visibleThreadIndexModifiedAt, !visibleThreads.isEmpty {
             return
         }
 
@@ -370,7 +709,7 @@ private actor CodexActivityScanner {
             return
         }
 
-        var IDs = Set<String>()
+        var threads: [String: ThreadMetadata] = [:]
         for line in text.split(separator: "\n") {
             guard let lineData = String(line).data(using: .utf8),
                   let entry = try? JSONSerialization.jsonObject(with: lineData)
@@ -378,10 +717,17 @@ private actor CodexActivityScanner {
                   let threadID = entry["id"] as? String else {
                 continue
             }
-            IDs.insert(threadID)
+            let title = entry["thread_name"] as? String
+                ?? "Untitled Codex task"
+            let updatedAt = (entry["updated_at"] as? String)
+                .flatMap(Self.iso8601Date)
+            threads[threadID] = ThreadMetadata(
+                title: title,
+                updatedAt: updatedAt
+            )
         }
 
-        visibleThreadIDs = IDs
+        visibleThreads = threads
         visibleThreadIndexModifiedAt = modifiedAt
     }
 
@@ -526,42 +872,163 @@ private actor CodexActivityScanner {
         )
     }
 
-    private static func lastLifecycle(in data: Data) -> Lifecycle? {
-        guard let text = String(data: data, encoding: .utf8) else { return nil }
-        var latest: Lifecycle?
+    private static func lastActivityUpdate(in data: Data) -> ActivityUpdate {
+        guard let text = String(data: data, encoding: .utf8) else {
+            return ActivityUpdate()
+        }
+        var update = ActivityUpdate()
 
         for line in text.split(separator: "\n") {
-            guard line.contains("\"type\":\"event_msg\""),
-                  line.contains("task_") || line.contains("turn_aborted"),
-                  let data = String(line).data(using: .utf8),
+            guard let data = String(line).data(using: .utf8),
                   let event = try? JSONSerialization.jsonObject(with: data)
                     as? [String: Any],
-                  let payload = event["payload"] as? [String: Any],
-                  let type = payload["type"] as? String else {
+                  let payload = event["payload"] as? [String: Any] else {
                 continue
             }
 
+            let type = payload["type"] as? String
             switch type {
             case "task_started":
-                latest = .started
-            case "task_complete", "turn_aborted":
-                latest = .stopped
+                update.lifecycle = .started
+                update.startedAt = eventDate(payload["started_at"])
+                    ?? eventDate(event["timestamp"])
+                update.completedAt = nil
+            case "task_complete", "task_cancelled", "turn_aborted":
+                update.lifecycle = .stopped
+                update.completedAt = eventDate(payload["completed_at"])
+                    ?? eventDate(event["timestamp"])
             default:
-                continue
+                break
+            }
+
+            if type == "token_count",
+               let consumedTokens = consumedTokenCount(from: payload) {
+                update.consumedTokens = consumedTokens
+            }
+            if update.fallbackTitle == nil {
+                update.fallbackTitle = userRequestTitle(from: event)
             }
         }
-        return latest
+        return update
+    }
+
+    private static func firstUserRequestTitle(in data: Data) -> String? {
+        guard let text = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+        for line in text.split(separator: "\n") {
+            guard let lineData = String(line).data(using: .utf8),
+                  let event = try? JSONSerialization.jsonObject(with: lineData)
+                    as? [String: Any],
+                  let title = userRequestTitle(from: event) else {
+                continue
+            }
+            return title
+        }
+        return nil
+    }
+
+    private static func userRequestTitle(
+        from event: [String: Any]
+    ) -> String? {
+        guard event["type"] as? String == "response_item",
+              let payload = event["payload"] as? [String: Any],
+              payload["type"] as? String == "message",
+              payload["role"] as? String == "user",
+              let content = payload["content"] as? [[String: Any]] else {
+            return nil
+        }
+
+        for item in content where item["type"] as? String == "input_text" {
+            guard var text = item["text"] as? String else { continue }
+            if let marker = text.range(of: "## My request:") {
+                text = String(text[marker.upperBound...])
+            }
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            let ignoredPrefixes = [
+                "# AGENTS.md instructions",
+                "# Files mentioned by the user:",
+                "<app-context>",
+                "<environment_context>",
+                "<permissions instructions>",
+                "<skills_instructions>",
+            ]
+            guard !trimmed.isEmpty,
+                  !ignoredPrefixes.contains(where: {
+                      trimmed.hasPrefix($0)
+                  }) else {
+                continue
+            }
+
+            let normalized = trimmed
+                .components(separatedBy: .whitespacesAndNewlines)
+                .filter { !$0.isEmpty }
+                .joined(separator: " ")
+            guard !normalized.isEmpty else { continue }
+            let maximumLength = 110
+            if normalized.count <= maximumLength {
+                return normalized
+            }
+            return String(normalized.prefix(maximumLength)) + "…"
+        }
+        return nil
+    }
+
+    private static func consumedTokenCount(from dictionary: [String: Any]) -> Int? {
+        if let usage = dictionary["total_token_usage"] as? [String: Any],
+           let value = netTokenCount(from: usage) {
+            return value
+        }
+        if let usage = dictionary["usage"] as? [String: Any],
+           let value = netTokenCount(from: usage) {
+            return value
+        }
+        if let info = dictionary["info"] as? [String: Any],
+           let value = consumedTokenCount(from: info) {
+            return value
+        }
+        return netTokenCount(from: dictionary)
+    }
+
+    private static func netTokenCount(from dictionary: [String: Any]) -> Int? {
+        guard let total = (dictionary["total_tokens"] as? NSNumber)?.doubleValue
+        else { return nil }
+        let cached = (dictionary["cached_input_tokens"] as? NSNumber)?.doubleValue
+            ?? 0
+        return Int(max(0, total - cached).rounded())
+    }
+
+    private static func eventDate(_ value: Any?) -> Date? {
+        if let number = value as? NSNumber {
+            let timestamp = number.doubleValue
+            return Date(timeIntervalSince1970: timestamp > 10_000_000_000
+                ? timestamp / 1_000
+                : timestamp)
+        }
+        guard let string = value as? String else { return nil }
+        if let timestamp = Double(string) {
+            return Date(timeIntervalSince1970: timestamp > 10_000_000_000
+                ? timestamp / 1_000
+                : timestamp)
+        }
+        return iso8601Date(string)
+    }
+
+    private static func iso8601Date(_ value: String) -> Date? {
+        let fractionalFormatter = ISO8601DateFormatter()
+        fractionalFormatter.formatOptions = [
+            .withInternetDateTime,
+            .withFractionalSeconds,
+        ]
+        if let date = fractionalFormatter.date(from: value) {
+            return date
+        }
+        return ISO8601DateFormatter().date(from: value)
     }
 
     private static func firstJSONEvent(
-        in url: URL
+        in data: Data
     ) -> [String: Any]? {
-        guard let handle = try? FileHandle(forReadingFrom: url) else {
-            return nil
-        }
-        defer { handle.closeFile() }
-
-        let data = handle.readData(ofLength: 64 * 1_024)
         let lineData = data.prefix { $0 != 0x0A }
         guard !lineData.isEmpty,
               let object = try? JSONSerialization.jsonObject(with: Data(lineData))
@@ -569,6 +1036,17 @@ private actor CodexActivityScanner {
             return nil
         }
         return object
+    }
+
+    private static func headData(
+        of url: URL,
+        maximumBytes: Int
+    ) -> Data? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else {
+            return nil
+        }
+        defer { handle.closeFile() }
+        return handle.readData(ofLength: maximumBytes)
     }
 
     private static func tailData(

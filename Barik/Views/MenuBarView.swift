@@ -2,11 +2,21 @@ import SwiftUI
 import ScreenCaptureKit
 import UniformTypeIdentifiers
 
+// Own the model without subscribing the entire menu bar to every focus event.
+// SpacesWidget and FocusedWindowWidget observe it at their own view boundaries.
+private final class SpacesModelOwner: ObservableObject {
+    static let shared = SpacesModelOwner()
+    let model = SpacesViewModel()
+}
+
 struct MenuBarView: View {
     @ObservedObject var configManager = ConfigManager.shared
     @ObservedObject var displayManager = DisplayManager.shared
     @ObservedObject private var doNotDisturbManager = DoNotDisturbManager.shared
-    @StateObject private var spacesViewModel = SpacesViewModel()
+    @ObservedObject private var caffeinateManager = CaffeinateManager.shared
+    @ObservedObject private var batteryManager = BatteryManager.shared
+    @StateObject private var spacesOwner = SpacesModelOwner.shared
+    private var spacesViewModel: SpacesViewModel { spacesOwner.model }
     @StateObject private var contrastManager = AdaptiveContrastManager()
     @State private var widgetItems: [TomlWidgetItem] = []
     @State private var draggingItem: TomlWidgetItem?
@@ -28,14 +38,13 @@ struct MenuBarView: View {
         ("default.airpodsbattery", "AirPods Battery"),
         ("default.audiooutput", "Audio Output"),
         ("default.brightness", "Brightness"),
-        ("default.tailscale", "Tailscale Home"),
         ("default.network", "Network"),
         ("default.battery", "Battery"),
         ("default.time", "Time & Calendar"),
         ("default.nextmeeting", "Next Meeting"),
-        ("default.caffeinate", "Caffeinate"),
         ("default.iterm", "iTerm"),
         ("default.nowplaying", "Now Playing"),
+        ("default.oneplus", "OnePlus 7"),
     ]
 
     private var displayedFingerprint: String {
@@ -48,18 +57,39 @@ struct MenuBarView: View {
         let hiddenWidgets = displayManager.isBuiltinDisplay
             ? configManager.config.builtinDisplay.hiddenWidgets
             : []
-        let items = widgetItems.filter { !hiddenWidgets.contains($0.id) }
+        let items = widgetItems.filter {
+            !hiddenWidgets.contains($0.id)
+                && !compactHiddenWidgetIDs.contains($0.id)
+                && $0.id != "default.tailscale"
+                && $0.id != "default.caffeinate"
+                && ($0.id != "default.battery" || batteryManager.shouldShowWidget)
+        }
 
         let hasFocusedWindow = items.contains(where: { $0.id == "default.focusedwindow" })
+        let centersMusic = !displayManager.isBuiltinDisplay && hasFocusedWindow
+            && items.contains(where: { $0.id == "spacer" })
+            && items.contains(where: { $0.id == "default.spotify" })
         let displayItems = items.filter {
             $0.id != "default.focusedwindow"
+                && (!centersMusic || $0.id != "default.spotify")
                 && ($0.id != "default.donotdisturb" || doNotDisturbManager.isActive)
         }
 
-        HStack(spacing: 0) {
-            HStack(spacing: configManager.config.experimental.foreground.spacing) {
-                ForEach(Array(displayItems.enumerated()), id: \.element.instanceID) { index, item in
+        let notch = displayManager.notchAvoidanceRange
+        let layout = notch.map {
+            AnyLayout(NotchedMenuBarLayout(
+                notch: ($0.lowerBound - effectiveHorizontalPadding)...($0.upperBound - effectiveHorizontalPadding),
+                spacing: effectiveWidgetSpacing,
+                height: configManager.config.experimental.foreground.resolveHeight()))
+        } ?? AnyLayout(HStackLayout(spacing: effectiveWidgetSpacing))
+        let spacerIndex = displayItems.firstIndex(where: { $0.id == "spacer" }) ?? displayItems.count / 2
+        let arrangedItems = displayItems.enumerated().filter { notch == nil || $0.element.id != "spacer" }
+
+        layout {
+                ForEach(Array(arrangedItems), id: \.element.instanceID) { index, item in
                     buildView(for: item)
+                        .layoutValue(key: BarikWidgetID.self, value: item.id)
+                        .layoutValue(key: BarikWidgetOnLeft.self, value: index < spacerIndex)
                         .barikColorScheme(colorScheme(for: index, in: displayItems))
                         .opacity(draggingItem?.instanceID == item.instanceID ? 0.45 : 1)
                         .onDrag {
@@ -77,8 +107,6 @@ struct MenuBarView: View {
                             )
                         )
                 }
-            }
-
             if !items.contains(where: { $0.id == "system-banner" }) {
                 SystemBannerWidget(withLeftPadding: true)
                     .barikColorScheme(colorScheme(for: .right))
@@ -94,19 +122,58 @@ struct MenuBarView: View {
                         : 360
                     FocusedWindowWidget(
                         spacesViewModel: spacesViewModel,
-                        maxWidth: availableWidth
+                        maxWidth: centersMusic ? min(360, availableWidth) : availableWidth
                     )
                     .barikColorScheme(colorScheme(for: .right))
                     .frame(maxWidth: .infinity)
+                    if centersMusic, let music = items.first(where: { $0.id == "default.spotify" }) {
+                        // Reserve a fixed title lane. Focused title length never moves music.
+                        let left = max(center + 190, spacerFrame.minX)
+                        let right = spacerFrame.maxX - 10
+                        let width = max(0, min(230, right - left))
+                        buildView(for: music)
+                            .barikColorScheme(colorScheme(for: .right))
+                            .frame(width: width, height: geometry.size.height)
+                            .clipped()
+                            .position(x: (left + right) / 2, y: geometry.size.height / 2)
+                    }
                 }
             }
         }
         .foregroundStyle(Color.foregroundOutside)
         .frame(height: max(configManager.config.experimental.foreground.resolveHeight(), 1.0))
         .frame(maxWidth: .infinity)
-        .padding(.horizontal, configManager.config.experimental.foreground.horizontalPadding)
+        .padding(.leading, effectiveHorizontalPadding)
+        // The built-in display's rounded corner moves the privacy dot inward.
+        // The external display's privacy dot is centered 8 pt from the edge.
+        // Reserving 16 pt balances the clock-to-dot and dot-to-edge gaps.
+        .padding(.trailing, displayManager.isBuiltinDisplay
+            ? max(effectiveHorizontalPadding, 32)
+            : 16)
         .background(.black.opacity(0.001))
         .contextMenu {
+            Button(caffeinateManager.isActive ? "Turn Off Keep Awake" : "Turn On Keep Awake") {
+                caffeinateManager.toggle()
+            }
+            Button(caffeinateManager.isJiggling ? "Turn Off Mouse Jiggler" : "Turn On Mouse Jiggler") {
+                caffeinateManager.toggleJiggler()
+            }
+            Divider()
+            if ProcessInfo.processInfo.arguments.contains("--stack-marker-comparison") {
+                Button("Hide comparison bar") {
+                    NotificationCenter.default.post(name: Notification.Name("HideStackMarkerComparison"), object: nil)
+                }
+                Divider()
+            }
+            Menu("Bar Theme") {
+                Button(configManager.config.experimental.foreground.isCompactFlat ? "✓ Compact Flat" : "Compact Flat") {
+                    configManager.updateConfigValue(key: "experimental.foreground.style", newValue: "compact-flat")
+                }
+                Button(configManager.config.experimental.foreground.isCompactFlat ? "Original Bubbles" : "✓ Original Bubbles") {
+                    configManager.updateConfigValue(key: "experimental.foreground.style", newValue: "bubbles")
+                }
+            }
+            Divider()
             ForEach(contextMenuWidgets, id: \.id) { entry in
                 Button {
                     let wasDisplayed = widgetItems.contains(where: { $0.id == entry.id })
@@ -178,6 +245,8 @@ struct MenuBarView: View {
         switch item.id {
         case "default.system":
             SystemWidget().environmentObject(config)
+                .fixedSize(horizontal: true, vertical: false)
+                .layoutPriority(3)
 
         case "default.spaces":
             SpacesWidget(viewModel: spacesViewModel)
@@ -186,15 +255,13 @@ struct MenuBarView: View {
         case "default.network":
             NetworkWidget().environmentObject(config)
 
-        case "default.tailscale":
-            TailscaleWidget()
-
         case "default.battery":
             BatteryWidget().environmentObject(config)
 
         case "default.time":
             TimeWidget(configProvider: config)
                 .environmentObject(config)
+                .layoutPriority(displayManager.isBuiltinDisplayOnly ? 2 : 0)
 
         case "default.nextmeeting":
             NextMeetingWidget(configProvider: config)
@@ -224,8 +291,10 @@ struct MenuBarView: View {
                 .environmentObject(config)
 
         case "default.caffeinate":
-            CaffeinateWidget()
-                .environmentObject(config)
+            EmptyView()
+
+        case "default.oneplus":
+            OnePlusWidget()
 
         case "default.iterm":
             ITermWidget()
@@ -250,6 +319,7 @@ struct MenuBarView: View {
         case "default.spotify":
             SpotifyWidget()
                 .environmentObject(config)
+                .layoutPriority(2)
 
         case "default.resources":
             ResourceMonitorWidget()
@@ -262,9 +332,21 @@ struct MenuBarView: View {
             EmptyView()
 
         case "spacer":
-            let minWidth = max(50, displayManager.notchSpacerWidth)
+            // Spaces inserts the physical notch gap itself. Let this flexible
+            // separator collapse so the widgets after it remain on-screen.
+            let minWidth: CGFloat = {
+                if configManager.config.experimental.foreground.isCompactFlat,
+                   let notch = displayManager.notchAvoidanceRange {
+                    return notch.upperBound - notch.lowerBound + 24
+                }
+                return spacesAvoidNotch ? 0 : 50
+            }()
             Spacer()
                 .frame(minWidth: minWidth, maxWidth: .infinity)
+                .padding(
+                    .horizontal,
+                    spacesAvoidNotch ? -effectiveWidgetSpacing : 0
+                )
                 .background {
                     GeometryReader { geometry in
                         let frame = geometry.frame(in: .named("menuBar"))
@@ -276,10 +358,9 @@ struct MenuBarView: View {
 
         case "fixed-spacer":
             let width = CGFloat(config.config["width"]?.doubleValue ?? 0)
-            let spacing = configManager.config.experimental.foreground.spacing
             Color.clear
                 .frame(width: max(0, width))
-                .padding(.horizontal, -spacing)
+                .padding(.horizontal, -effectiveWidgetSpacing)
 
         case "divider":
             Rectangle()
@@ -293,6 +374,98 @@ struct MenuBarView: View {
         default:
             Text("?\(item.id)?").foregroundColor(.red)
         }
+    }
+
+    private var spacesAvoidNotch: Bool {
+        guard displayManager.notchAvoidanceRange != nil,
+              !configManager.config.builtinDisplay.hiddenWidgets.contains("default.spaces"),
+              let spacesIndex = widgetItems.firstIndex(where: { $0.id == "default.spaces" }),
+              let spacerIndex = widgetItems.firstIndex(where: { $0.id == "spacer" })
+        else { return false }
+
+        return spacesIndex < spacerIndex
+    }
+
+    private var effectiveWidgetSpacing: CGFloat {
+        displayManager.isBuiltinDisplay
+            ? min(8, configManager.config.experimental.foreground.spacing)
+            : configManager.config.experimental.foreground.spacing
+    }
+
+    private var effectiveHorizontalPadding: CGFloat {
+        let configured = configManager.config.experimental.foreground.horizontalPadding
+        // Keep the configured edge inset on the notebook too; 8 pt cramped the Apple logo.
+        return configured
+    }
+
+    private var compactHiddenWidgetIDs: Set<String> {
+        guard displayManager.isBuiltinDisplay else { return [] }
+        return [
+            // The centered window title would sit under the camera housing.
+            "default.focusedwindow",
+            "default.headsetbattery",
+        ]
+    }
+}
+
+private struct BarikWidgetID: LayoutValueKey {
+    static let defaultValue = ""
+}
+
+private struct BarikWidgetOnLeft: LayoutValueKey {
+    static let defaultValue = false
+}
+
+/// Anchor each side independently. Music can change sides, but no widget
+/// can make the left edge or the clock drift beyond the screen.
+private struct NotchedMenuBarLayout: Layout {
+    let notch: ClosedRange<CGFloat>
+    let spacing: CGFloat
+    let height: CGFloat
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        CGSize(width: proposal.width ?? NSScreen.main?.frame.width ?? 1512, height: height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var sizes = subviews.map { $0.sizeThatFits(.unspecified) }
+        var left = subviews.indices.filter { subviews[$0][BarikWidgetOnLeft.self] }
+        var right = subviews.indices.filter { !subviews[$0][BarikWidgetOnLeft.self] }
+        let leftWidth = max(0, notch.lowerBound - 8)
+        let rightStart = notch.upperBound + 8
+        let rightWidth = max(0, bounds.width - rightStart)
+
+        func totalWidth(_ indices: [Int]) -> CGFloat {
+            let visible = indices.filter { sizes[$0].width > 0 }
+            return visible.reduce(0) { $0 + sizes[$1].width }
+                + CGFloat(max(0, visible.count - 1)) * spacing
+        }
+
+        if totalWidth(right) > rightWidth,
+           let music = right.first(where: { subviews[$0][BarikWidgetID.self] == "default.spotify" }) {
+            right.removeAll { $0 == music }
+            left.append(music)
+        }
+
+        if let spaces = left.first(where: { subviews[$0][BarikWidgetID.self] == "default.spaces" }) {
+            let others = left.filter { $0 != spaces && sizes[$0].width > 0 }
+            let available = max(0, leftWidth - totalWidth(others) - (others.isEmpty ? 0 : spacing))
+            sizes[spaces] = CGSize(width: available, height: height)
+        }
+
+        func place(_ indices: [Int], startingAt x: CGFloat) {
+            var cursor = x
+            for index in indices {
+                let size = sizes[index]
+                subviews[index].place(
+                    at: CGPoint(x: bounds.minX + cursor, y: bounds.midY),
+                    anchor: .leading,
+                    proposal: ProposedViewSize(width: size.width, height: height))
+                if size.width > 0 { cursor += size.width + spacing }
+            }
+        }
+        place(left, startingAt: 0)
+        place(right, startingAt: max(rightStart, bounds.width - totalWidth(right)))
     }
 }
 

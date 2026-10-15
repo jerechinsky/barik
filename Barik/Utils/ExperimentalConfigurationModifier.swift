@@ -9,7 +9,7 @@ private struct ExperimentalConfigurationModifier: ViewModifier {
     
     func body(content: Content) -> some View {
         Group {
-            if !configManager.config.experimental.foreground.widgetsBackground.displayed {
+            if configManager.config.experimental.foreground.isCompactFlat || !configManager.config.experimental.foreground.widgetsBackground.displayed {
                 content
             } else {
                 content

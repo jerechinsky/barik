@@ -52,6 +52,10 @@ class AerospaceSpacesProvider: SpacesProvider, SwitchableSpacesProvider {
         _ = runAerospaceCommand(arguments: ["focus", "--window-id", windowId])
     }
 
+    func closeWindow(windowId: String) {
+        _ = runAerospaceCommand(arguments: ["close", "--window-id", windowId])
+    }
+
     private func runAerospaceCommand(arguments: [String]) -> Data? {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executablePath)

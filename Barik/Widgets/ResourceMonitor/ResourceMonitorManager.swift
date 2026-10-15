@@ -59,7 +59,7 @@ class ResourceMonitorManager: ObservableObject {
     private func startTimer() {
         guard timer == nil else { return }
         let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now(), repeating: 1, leeway: .milliseconds(100))
+        timer.schedule(deadline: .now(), repeating: 5, leeway: .milliseconds(500))
         timer.setEventHandler { [weak self] in self?.refresh() }
         self.timer = timer
         timer.resume()

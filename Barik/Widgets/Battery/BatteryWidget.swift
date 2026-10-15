@@ -16,7 +16,7 @@ struct BatteryWidget: View {
     @State private var rect: CGRect = CGRect()
 
     var body: some View {
-        if !isPluggedIn || level <= 75 {
+        if batteryManager.shouldShowWidget {
             ZStack(alignment: .leading) {
                 BatteryBodyView(mask: false)
                     .opacity(showPercentage ? 0.3 : 0.4)

@@ -3,6 +3,10 @@ import SwiftUI
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var backgroundPanel: NSPanel?
     private var menuBarPanel: NSPanel?
+    private var caffeinatePanel: NSPanel?
+    private var comparisonPanel: NSPanel?
+    private var comparisonDismissed = false
+    private var displayRefreshWork: [DispatchWorkItem] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         if let error = ConfigManager.shared.initError {
@@ -23,13 +27,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         MenuBarPopup.setup()
-        setupPanels()
+        refreshDisplayLayout()
+        NotificationCenter.default.addObserver(self, selector: #selector(hideComparison), name: Notification.Name("HideStackMarkerComparison"), object: nil)
+
+        // Explicit local launch request; ordinary launches keep the jiggler off.
+        if ProcessInfo.processInfo.arguments.contains("--mouse-jiggler") {
+            CaffeinateManager.shared.toggleJiggler()
+        }
 
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(screenParametersDidChange(_:)),
             name: NSApplication.didChangeScreenParametersNotification,
             object: nil)
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(screenParametersDidChange(_:)),
+            name: SleepWakeManager.didWakeNotification, object: nil)
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self, selector: #selector(screenParametersDidChange(_:)),
+            name: NSWorkspace.screensDidWakeNotification, object: nil)
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
@@ -54,12 +70,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func screenParametersDidChange(_ notification: Notification) {
+        refreshDisplayLayout()
+    }
+
+    private func refreshDisplayLayout() {
+        // macOS may send the first event before resolution/main-display changes
+        // settle. Cancel the previous batch so hot-plug bursts stay bounded.
+        displayRefreshWork.forEach { $0.cancel() }
+        displayRefreshWork.removeAll()
         setupPanels()
         MenuBarPopup.updateFrame()
+        for delay in [0.5, 2.0, 5.0] {
+            let work = DispatchWorkItem { [weak self] in
+                self?.setupPanels()
+                MenuBarPopup.updateFrame()
+            }
+            displayRefreshWork.append(work)
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+        }
     }
 
     /// Configures and displays the background and menu bar panels.
     private func setupPanels() {
+        DisplayManager.shared.updateDisplayInfo()
         let screenFrame = CGDisplayBounds(CGMainDisplayID())
         setupPanel(
             &backgroundPanel,
@@ -71,6 +104,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             frame: screenFrame,
             level: Int(CGWindowLevelForKey(.backstopMenu)),
             hostingRootView: AnyView(MenuBarView()))
+        setupCaffeinatePanel(displayFrame: screenFrame)
+        if ProcessInfo.processInfo.arguments.contains("--stack-marker-comparison"), !comparisonDismissed,
+           let screen = NSScreen.screens.first(where: { ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == CGMainDisplayID() }) {
+            let height = ConfigManager.shared.config.experimental.foreground.resolveHeight() + 1
+            let frame = CGRect(x: screen.frame.minX, y: screen.frame.maxY - height * 2 - 10, width: screen.frame.width, height: height)
+            setupPanel(&comparisonPanel, frame: frame,
+                       level: Int(CGWindowLevelForKey(.popUpMenuWindow)),
+                       hostingRootView: AnyView(ZStack(alignment: .top) {
+                           BackgroundView()
+                           MenuBarView().environment(\.stackUsesSliderMarker, true)
+                       }.frame(height: height)))
+            comparisonPanel?.ignoresMouseEvents = true
+        }
+    }
+
+    private func setupCaffeinatePanel(displayFrame: CGRect) {
+        let indicator = DisplayManager.shared.privacyIndicatorCenter
+            ?? CGPoint(x: displayFrame.width - (DisplayManager.shared.isBuiltinDisplay ? 16 : 8),
+                       y: DisplayManager.shared.isBuiltinDisplay ? 16 : 8)
+        let spacing: CGFloat = DisplayManager.shared.isBuiltinDisplay ? 10 : 8
+        let width: CGFloat = 16
+        let builtin = DisplayManager.shared.isBuiltinDisplay
+        let height = spacing * (builtin ? 3 : 2)
+        let centerX = indicator.x
+        // Notebook: straddle the inset privacy dot. External: both dots below it.
+        let top = builtin ? max(0, indicator.y - height / 2) : indicator.y + spacing / 2
+        let frame = CGRect(
+            x: displayFrame.minX + centerX - width / 2,
+            y: displayFrame.maxY - top - height,
+            width: width,
+            height: height
+        )
+        if let caffeinatePanel {
+            caffeinatePanel.setFrame(frame, display: true)
+            caffeinatePanel.contentView = NSHostingView(rootView:
+                CaffeinateWidget(dotSpacing: spacing, reservesPrivacySlot: builtin).frame(width: width, height: height))
+            return
+        }
+        setupPanel(
+            &caffeinatePanel,
+            frame: frame,
+            level: Int(CGWindowLevelForKey(.statusWindow)) + 1,
+            hostingRootView: AnyView(CaffeinateWidget(dotSpacing: spacing, reservesPrivacySlot: builtin)
+                .frame(width: width, height: height)))
+    }
+
+    @objc private func hideComparison() {
+        comparisonDismissed = true
+        comparisonPanel?.orderOut(nil)
+        comparisonPanel = nil
     }
 
     /// Sets up an NSPanel with the provided parameters.

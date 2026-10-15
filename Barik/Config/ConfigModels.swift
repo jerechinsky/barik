@@ -357,12 +357,15 @@ struct ExperimentalConfig: Decodable {
 }
 
 struct ForegroundConfig: Decodable {
+    let style: String
+    var isCompactFlat: Bool { style == "compact-flat" }
     let height: BackgroundForegroundHeight
     let horizontalPadding: CGFloat
     let widgetsBackground: WidgetBackgroundConfig
     let spacing: CGFloat
     
     init() {
+        self.style = "bubbles"
         self.height = .barikDefault
         self.horizontalPadding = Constants.menuBarHorizontalPadding
         self.widgetsBackground = WidgetBackgroundConfig()
@@ -371,6 +374,7 @@ struct ForegroundConfig: Decodable {
     
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        style = try container.decodeIfPresent(String.self, forKey: .style) ?? "bubbles"
         height = try container.decodeIfPresent(BackgroundForegroundHeight.self, forKey: .height) ?? .barikDefault
         horizontalPadding = try container.decodeIfPresent(CGFloat.self, forKey: .horizontalPadding) ?? Constants.menuBarHorizontalPadding
         widgetsBackground = try container.decodeIfPresent(WidgetBackgroundConfig.self, forKey: .widgetsBackground) ?? WidgetBackgroundConfig()
@@ -378,13 +382,17 @@ struct ForegroundConfig: Decodable {
     }
     
     enum CodingKeys: String, CodingKey {
-        case height
+        case height, style
         case horizontalPadding = "horizontal-padding"
         case widgetsBackground = "widgets-background"
         case spacing
     }
     
     func resolveHeight() -> CGFloat {
+        return max(1, baseHeight() - (isCompactFlat ? 6 : 0))
+    }
+
+    private func baseHeight() -> CGFloat {
         switch height {
         case .barikDefault:
             return CGFloat(Constants.menuBarHeight)

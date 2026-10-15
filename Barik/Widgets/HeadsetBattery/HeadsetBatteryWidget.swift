@@ -281,10 +281,12 @@ private final class HeadsetBatteryManager: ObservableObject {
         #endif
 
         refresh()
-        timer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) {
+        // A battery value does not need sub-minute polling. Each refresh may
+        // perform several short USB probes while the receiver is waking.
+        timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) {
             [weak self] _ in self?.refresh()
         }
-        timer?.tolerance = 2
+        timer?.tolerance = 5
     }
 
     deinit {

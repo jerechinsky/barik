@@ -219,7 +219,20 @@ xcuserdata/
 .build/
 build-debug/
 .tmp/
+CodexMonitor/build/
+CodexMonitor/dist/
 
 # Local AI tool permissions
 .claude/settings.local.json
 #
+
+# Private local working material
+/work/
+/outputs/
+/backup/
+/backups/
+/interceptor-screenshot-*.png
+.env
+.env.*
+!.env.example
+*.log

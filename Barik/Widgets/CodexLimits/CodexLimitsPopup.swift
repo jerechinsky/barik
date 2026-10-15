@@ -53,8 +53,9 @@ struct CodexLimitsPopup: View {
         window: CodexLimitWindow?
     ) -> some View {
         let remaining = window?.remainingPercent
+        let budget = window?.availableToSpendToday()
 
-        return VStack(alignment: .leading, spacing: 8) {
+        return VStack(alignment: .leading, spacing: 9) {
             HStack {
                 Image(systemName: icon)
                     .font(.system(size: 12))
@@ -67,24 +68,29 @@ struct CodexLimitsPopup: View {
                     .monospacedDigit()
             }
 
-            GeometryReader { geometry in
-                ZStack(alignment: .leading) {
-                    RoundedRectangle(cornerRadius: 3)
-                        .fill(Color.gray.opacity(0.3))
-                        .frame(height: 6)
-                    if let remaining {
-                        RoundedRectangle(cornerRadius: 3)
-                            .fill(progressColor(remaining))
-                            .frame(
-                                width: geometry.size.width
-                                    * CGFloat(remaining) / 100,
-                                height: 6
-                            )
-                            .animation(.easeOut(duration: 0.3), value: remaining)
+            CodexSegmentedBar(window: window, width: 234, height: 10)
+
+            if let budget {
+                HStack(alignment: .firstTextBaseline) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "sun.max.fill")
+                            .font(.system(size: 9))
+                            .opacity(0.55)
+                        Text(
+                            "\(budget.compactPercentText) available \(periodText(for: budget))"
+                        )
+                            .font(.system(size: 11, weight: .semibold))
+                            .monospacedDigit()
                     }
+                    Spacer()
+                    Text(
+                        "keep \(budget.targetRemainingPercent)%"
+                    )
+                        .font(.system(size: 10, weight: .medium))
+                        .opacity(0.45)
+                        .monospacedDigit()
                 }
             }
-            .frame(height: 6)
 
             if let resetDate = window?.resetsAt {
                 Text("Resets \(resetTimeString(resetDate))")
@@ -157,12 +163,6 @@ struct CodexLimitsPopup: View {
         .padding(.vertical, 26)
     }
 
-    private func progressColor(_ remaining: Int) -> Color {
-        if remaining <= 20 { return .red }
-        if remaining <= 40 { return .orange }
-        return .white
-    }
-
     private func planColor(_ plan: String) -> Color {
         switch plan.lowercased() {
         case "pro": return .orange
@@ -174,18 +174,18 @@ struct CodexLimitsPopup: View {
         }
     }
 
-    private func resetTimeString(_ date: Date) -> String {
-        let interval = date.timeIntervalSinceNow
-        if interval <= 0 { return "soon" }
-
-        let hours = Int(interval) / 3_600
-        let minutes = (Int(interval) % 3_600) / 60
-        if hours > 24 {
-            let formatter = DateFormatter()
-            formatter.dateFormat = "E h:mm a"
-            return formatter.string(from: date)
+    private func periodText(for budget: CodexDailyBudget) -> String {
+        if budget.endsAtReset {
+            return "before reset"
         }
-        return hours > 0 ? "in \(hours)h \(minutes)m" : "in \(minutes)m"
+        return Calendar.current.component(.hour, from: Date()) >= 17
+            ? "tonight"
+            : "today"
+    }
+
+    private func resetTimeString(_ date: Date) -> String {
+        date.formatted(.dateTime.weekday(.wide).day().month().hour().minute())
+            + " " + (TimeZone.current.abbreviation(for: date) ?? "")
     }
 
     private func timeAgoString(_ date: Date) -> String {

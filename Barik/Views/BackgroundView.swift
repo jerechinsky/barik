@@ -15,7 +15,7 @@ struct BackgroundView: View {
         let height = configManager.config.experimental.background.resolveHeight()
         
         return Color.clear
-            .frame(height: height ?? geometry.size.height)
+            .frame(height: max(1, (height ?? geometry.size.height) - (configManager.config.experimental.foreground.isCompactFlat ? 6 : 0)))
             .preferredColorScheme(theme)
         
     }

@@ -17,6 +17,20 @@ struct CodexLimitWindow: Equatable {
     var remainingFraction: Double {
         Double(remainingPercent) / 100
     }
+
+    func availableToSpendToday(
+        at date: Date = Date(),
+        calendar: Calendar = .current
+    ) -> CodexDailyBudget? {
+        guard let resetsAt else { return nil }
+        return CodexDailyBudgetCalculator.calculate(
+            remainingPercent: remainingPercent,
+            resetsAt: resetsAt,
+            at: date,
+            calendar: calendar,
+            windowDurationMinutes: windowDurationMinutes ?? 7 * 24 * 60
+        )
+    }
 }
 
 struct CodexLimitsSnapshot: Equatable {
@@ -118,7 +132,7 @@ final class CodexLimitsManager: ObservableObject {
 
     func startUpdating(config: ConfigData) {
         refreshInterval = max(
-            5,
+            60,
             TimeInterval(config["refresh-interval-seconds"]?.intValue ?? 60)
         )
         planOverride = config["plan"]?.stringValue
@@ -126,14 +140,17 @@ final class CodexLimitsManager: ObservableObject {
         refresh()
     }
 
-    func refresh() {
+    func refresh(useLiveUsage: Bool = true) {
         guard !isRefreshing else { return }
         isRefreshing = true
 
         let planOverride = planOverride
         Task {
             let result = await Task.detached(priority: .utility) {
-                Self.loadLimits(planOverride: planOverride)
+                Self.loadLimits(
+                    planOverride: planOverride,
+                    useLiveUsage: useLiveUsage
+                )
             }.value
 
             self.updateWatchedPaths(result.watchPaths)
@@ -217,11 +234,14 @@ final class CodexLimitsManager: ObservableObject {
         pendingRefreshWorkItem?.cancel()
         let workItem = DispatchWorkItem { [weak self] in
             Task { @MainActor in
-                self?.refresh()
+                // Codex's live app server writes files under ~/.codex while it
+                // answers. File events must use the bounded session fallback,
+                // otherwise each live query schedules another live query.
+                self?.refresh(useLiveUsage: false)
             }
         }
         pendingRefreshWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8, execute: workItem)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: workItem)
     }
 
     private func updateWatchedPaths(_ paths: [String]) {
@@ -255,7 +275,8 @@ final class CodexLimitsManager: ObservableObject {
     }
 
     nonisolated private static func loadLimits(
-        planOverride: String?
+        planOverride: String?,
+        useLiveUsage: Bool
     ) -> LoadedCodexLimits {
         let codexHome = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".codex", isDirectory: true)
@@ -271,7 +292,7 @@ final class CodexLimitsManager: ObservableObject {
 
         // Prefer Codex's live local app-server API. Session JSONL files are a
         // fallback and may remain unchanged for hours between CLI-backed turns.
-        if let liveSnapshot = liveUsageSnapshot() {
+        if useLiveUsage, let liveSnapshot = liveUsageSnapshot() {
             let windows = classifiedWindows(
                 primary: liveSnapshot.primary,
                 secondary: liveSnapshot.secondary
@@ -290,7 +311,10 @@ final class CodexLimitsManager: ObservableObject {
                 ),
                 isAuthenticated: true,
                 message: nil,
-                watchPaths: paths
+                // The live query is already refreshed on a timer. Watching
+                // active session logs here would turn every Codex output chunk
+                // into another quota refresh.
+                watchPaths: []
             )
         }
 
@@ -459,10 +483,10 @@ final class CodexLimitsManager: ObservableObject {
         var canonicalCandidates: [CodexUsageSnapshot] = []
         var fallbackCandidates: [CodexUsageSnapshot] = []
 
-        for fileURL in recentSessionFiles(in: sessionsURL) {
-            guard let content = try? String(
-                contentsOf: fileURL,
-                encoding: .utf8
+        for fileURL in recentSessionFiles(in: sessionsURL).prefix(8) {
+            guard let content = tailText(
+                of: fileURL,
+                maximumBytes: 1 * 1_024 * 1_024
             ) else { continue }
 
             for line in content.split(separator: "\n").reversed() {
@@ -494,6 +518,30 @@ final class CodexLimitsManager: ObservableObject {
 
         return reliableNewestSnapshot(from: canonicalCandidates)
             ?? reliableNewestSnapshot(from: fallbackCandidates)
+    }
+
+    /// Usage events are appended near the end of a session log. Reading a
+    /// bounded tail avoids loading very large, long-running Codex sessions in
+    /// full whenever the widget refreshes.
+    nonisolated private static func tailText(
+        of url: URL,
+        maximumBytes: UInt64
+    ) -> String? {
+        guard let values = try? url.resourceValues(forKeys: [.fileSizeKey]),
+              let fileSize = values.fileSize,
+              let handle = try? FileHandle(forReadingFrom: url) else {
+            return nil
+        }
+        defer { handle.closeFile() }
+
+        let size = UInt64(max(0, fileSize))
+        let offset = size > maximumBytes ? size - maximumBytes : 0
+        handle.seek(toFileOffset: offset)
+        var data = handle.readDataToEndOfFile()
+        if offset > 0, let newline = data.firstIndex(of: 0x0A) {
+            data.removeSubrange(...newline)
+        }
+        return String(data: data, encoding: .utf8)
     }
 
     /// New Codex sessions can briefly emit a synthetic 0/0 snapshot with a new

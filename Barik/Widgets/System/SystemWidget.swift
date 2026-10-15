@@ -7,6 +7,7 @@ struct SystemWidget: View {
     @EnvironmentObject var configProvider: ConfigProvider
     @ObservedObject private var configManager = ConfigManager.shared
     @ObservedObject private var doNotDisturbManager = DoNotDisturbManager.shared
+    @ObservedObject private var caffeinateManager = CaffeinateManager.shared
     var leadingPadding: CGFloat { CGFloat(configProvider.config["leading-padding"]?.doubleValue ?? 0) }
     var trailingPadding: CGFloat { CGFloat(configProvider.config["trailing-padding"]?.doubleValue ?? 0) }
 
@@ -23,18 +24,26 @@ struct SystemWidget: View {
             .padding(.trailing, trailingPadding)
             .background(.black.opacity(0.001))
             .onTapGesture {
-                if NSEvent.modifierFlags.contains(.option) {
+                if NSEvent.modifierFlags.contains(.command) {
+                    caffeinateManager.activate()
+                } else if NSEvent.modifierFlags.contains(.option) {
                     doNotDisturbManager.toggle()
                 } else {
                     cycleTheme()
                 }
             }
-            .help("Click: switch theme. Option-click: toggle Do Not Disturb.")
+            .help(
+                "Click: switch theme. Option-click: toggle Do Not Disturb. "
+                    + "Command-click: turn on Keep Awake mode."
+            )
             .accessibilityLabel("Theme control")
             .accessibilityValue(configManager.config.theme.capitalized)
             .accessibilityAction { cycleTheme() }
             .accessibilityAction(named: "Toggle Do Not Disturb") {
                 doNotDisturbManager.toggle()
+            }
+            .accessibilityAction(named: "Turn on Keep Awake mode") {
+                caffeinateManager.activate()
             }
     }
 

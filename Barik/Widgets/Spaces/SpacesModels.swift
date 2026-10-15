@@ -24,6 +24,13 @@ protocol SpacesProvider {
 protocol SwitchableSpacesProvider: SpacesProvider {
     func focusSpace(spaceId: String, needWindowFocus: Bool)
     func focusWindow(windowId: String)
+    func closeWindow(windowId: String)
+}
+
+protocol MovableWindowsProvider: SpacesProvider {
+    func moveWindow(windowId: Int, toSpace: String) -> Bool
+    func swapWindows(_ first: Int, _ second: Int) -> Bool
+    func arrangeWindow(_ id: Int, relativeTo target: Int, direction: String?, detachFirst: Bool) -> Bool
 }
 
 struct AnyWindow: Identifiable, Equatable {
@@ -32,7 +39,8 @@ struct AnyWindow: Identifiable, Equatable {
     let appName: String?
     var isFocused: Bool
     let appIcon: NSImage?
-    let frameX: CGFloat?
+    let stackIndex: Int
+    let frame: CGRect?
 
     init<W: WindowModel>(_ window: W) {
         self.id = window.id
@@ -41,15 +49,20 @@ struct AnyWindow: Identifiable, Equatable {
         self.isFocused = window.isFocused
         self.appIcon = window.appIcon
         if let yabaiWindow = window as? YabaiWindow {
-            self.frameX = yabaiWindow.frame?.x
+            self.stackIndex = yabaiWindow.stackIndex
+            self.frame = yabaiWindow.frame.map {
+                CGRect(x: $0.x, y: $0.y, width: $0.w, height: $0.h)
+            }
         } else {
-            self.frameX = nil
+            self.stackIndex = 0
+            self.frame = nil
         }
     }
 
     static func == (lhs: AnyWindow, rhs: AnyWindow) -> Bool {
         return lhs.id == rhs.id && lhs.title == rhs.title
             && lhs.appName == rhs.appName && lhs.isFocused == rhs.isFocused
+            && lhs.stackIndex == rhs.stackIndex && lhs.frame == rhs.frame
     }
 }
 
@@ -92,8 +105,11 @@ class AnySpacesProvider {
     private let _getFocusedSpaceId: () -> String?
     private let _focusSpace: ((String, Bool) -> Void)?
     private let _focusWindow: ((String) -> Void)?
+    private let _closeWindow: ((String) -> Void)?
+    private let movable: (any MovableWindowsProvider)?
 
     init<P: SpacesProvider>(_ provider: P) {
+        movable = provider as? any MovableWindowsProvider
         _getSpacesWithWindows = {
             provider.getSpacesWithWindows()?.map { AnySpace($0) }
         }
@@ -108,9 +124,13 @@ class AnySpacesProvider {
             _focusWindow = { windowId in
                 switchable.focusWindow(windowId: windowId)
             }
+            _closeWindow = { windowId in
+                switchable.closeWindow(windowId: windowId)
+            }
         } else {
             _focusSpace = nil
             _focusWindow = nil
+            _closeWindow = nil
         }
     }
 
@@ -128,5 +148,19 @@ class AnySpacesProvider {
 
     func focusWindow(windowId: String) {
         _focusWindow?(windowId)
+    }
+
+    func moveWindow(_ id: Int, toSpace: String) -> Bool {
+        movable?.moveWindow(windowId: id, toSpace: toSpace) ?? false
+    }
+    func arrangeWindow(_ id: Int, relativeTo target: Int, direction: String?, detachFirst: Bool) -> Bool {
+        movable?.arrangeWindow(id, relativeTo: target, direction: direction, detachFirst: detachFirst) ?? false
+    }
+    func swapWindows(_ first: Int, _ second: Int) -> Bool {
+        movable?.swapWindows(first, second) ?? false
+    }
+
+    func closeWindow(windowId: String) {
+        _closeWindow?(windowId)
     }
 }

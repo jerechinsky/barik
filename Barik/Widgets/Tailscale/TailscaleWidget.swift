@@ -305,6 +305,7 @@ private final class TailscaleStatusManager: ObservableObject {
 
     @Published private(set) var snapshot = TailscaleSnapshot.empty
     @Published private(set) var latencyMS: Int?
+    @Published private(set) var browserRoutingEnabled = false
     @Published private(set) var isRefreshing = false
     @Published private(set) var errorMessage: String?
 
@@ -322,34 +323,39 @@ private final class TailscaleStatusManager: ObservableObject {
     }
 
     var isEnabled: Bool {
-        snapshot.backendState == "Running"
+        snapshot.backendState == "Running" && browserRoutingEnabled
     }
 
     var statusColor: Color {
-        if snapshot.isHomeConnected { return .green }
+        if snapshot.isHomeConnected, browserRoutingEnabled { return .green }
         if snapshot.selfNode?.online == true { return .orange }
         return snapshot.updatedAt == nil ? .gray : .red
     }
 
     var connectionTitle: String {
-        if snapshot.isHomeConnected { return "Connected" }
+        if snapshot.isHomeConnected, browserRoutingEnabled { return "Connected" }
+        if snapshot.isHomeConnected { return "Browser route off" }
         if snapshot.selfNode?.online == true { return "Home offline" }
         return snapshot.updatedAt == nil ? "Checking…" : "Disconnected"
     }
 
     var connectionSubtitle: String {
-        if let latencyMS, snapshot.isHomeConnected {
+        if let errorMessage { return errorMessage }
+        if let latencyMS, snapshot.isHomeConnected, browserRoutingEnabled {
             return "Personal Tailscale · \(latencyMS) ms \(snapshot.path.description.lowercased())"
         }
-        if snapshot.isHomeConnected {
-            return "Personal Tailscale · home subnet available"
+        if snapshot.isHomeConnected, browserRoutingEnabled {
+            return "Personal Tailscale · browser routing active"
         }
-        return errorMessage ?? "Personal Tailscale is unavailable"
+        if snapshot.isHomeConnected {
+            return "Tailscale is online, but browser routing is unavailable"
+        }
+        return "Personal Tailscale is unavailable"
     }
 
     var helpText: String {
-        snapshot.isHomeConnected
-            ? "Home Tailscale connected · click for path and devices"
+        snapshot.isHomeConnected && browserRoutingEnabled
+            ? "Home browser access connected · click for path and devices"
             : "\(connectionTitle) · click for details"
     }
 
@@ -423,15 +429,17 @@ private final class TailscaleStatusManager: ObservableObject {
         switch result {
         case let .success(update):
             snapshot = update.snapshot
+            browserRoutingEnabled = update.browserRoutingEnabled
             if let measuredLatency = update.latencyMS {
                 latencyMS = measuredLatency
             } else if !update.snapshot.isHomeConnected {
                 latencyMS = nil
             }
-            errorMessage = nil
+            errorMessage = update.routingError
         case let .failure(error):
             snapshot = .offline
             latencyMS = nil
+            browserRoutingEnabled = false
             errorMessage = error.localizedDescription
         }
         isRefreshing = false
@@ -454,6 +462,16 @@ private final class TailscaleStatusManager: ObservableObject {
         do {
             var status = try loadStatus()
             var latency: Int?
+            var routingEnabled = false
+            var routingError: String?
+
+            do {
+                try HomeNetworkProxy.enable()
+                routingEnabled = try HomeNetworkProxy.isEnabledForActiveService()
+            } catch {
+                routingEnabled = false
+                routingError = error.localizedDescription
+            }
 
             if probeHome, let homePeer = status.homePeer, homePeer.online {
                 if let output = try? runTailscale(
@@ -465,7 +483,14 @@ private final class TailscaleStatusManager: ObservableObject {
                 }
             }
 
-            return .success(TailscaleUpdate(snapshot: status, latencyMS: latency))
+            return .success(
+                TailscaleUpdate(
+                    snapshot: status,
+                    latencyMS: latency,
+                    browserRoutingEnabled: routingEnabled,
+                    routingError: routingError
+                )
+            )
         } catch {
             return .failure(error)
         }
@@ -560,6 +585,167 @@ private final class TailscaleStatusManager: ObservableObject {
 private struct TailscaleUpdate: Sendable {
     let snapshot: TailscaleSnapshot
     let latencyMS: Int?
+    let browserRoutingEnabled: Bool
+    let routingError: String?
+}
+
+private enum HomeNetworkProxy {
+    private static let networkSetup = "/usr/sbin/networksetup"
+    private static let route = "/sbin/route"
+    private static let proxyServerURL = "http://127.0.0.1:17375/home-tailscale.pac"
+
+    private static var pacFileURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/Barik", isDirectory: true)
+            .appendingPathComponent("home-tailscale.pac")
+    }
+
+    private static var pacURL: String {
+        proxyServerURL
+    }
+
+    static func enable() throws {
+        try verifyIndependentPACServer()
+        let service = try activeNetworkService()
+        let setting = try automaticProxySetting(for: service)
+
+        if let existingURL = setting.url, !isOurPAC(existingURL) {
+            throw TailscaleError(
+                "\(service) already uses another automatic proxy; Barik left it unchanged"
+            )
+        }
+
+        guard !(setting.enabled && setting.url == pacURL) else { return }
+
+        _ = try run(
+            networkSetup,
+            ["-setautoproxyurl", service, pacURL],
+            timeout: 5
+        )
+
+        let updated = try automaticProxySetting(for: service)
+        guard updated.enabled, updated.url.map(isOurPAC) == true else {
+            throw TailscaleError("Could not enable home browser routing on \(service)")
+        }
+    }
+
+    static func isEnabledForActiveService() throws -> Bool {
+        let setting = try automaticProxySetting(for: activeNetworkService())
+        return setting.enabled && setting.url.map(isOurPAC) == true
+    }
+
+    private static func verifyIndependentPACServer() throws {
+        let contents = try run(
+            "/usr/bin/curl",
+            ["--fail", "--silent", "--show-error", "--max-time", "2", proxyServerURL],
+            timeout: 3
+        )
+        guard contents.contains("FindProxyForURL"),
+              contents.contains("SOCKS5 127.0.0.1:1055")
+        else {
+            throw TailscaleError("Independent home browser routing service is unavailable")
+        }
+    }
+
+    private static func activeNetworkService() throws -> String {
+        let routeOutput = try run(route, ["-n", "get", "default"], timeout: 4)
+        guard let interfaceLine = routeOutput.split(separator: "\n").first(where: {
+            $0.trimmingCharacters(in: .whitespaces).hasPrefix("interface:")
+        }), let interface = interfaceLine.split(separator: ":", maxSplits: 1).last?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !interface.isEmpty
+        else {
+            throw TailscaleError("Could not identify the active network interface")
+        }
+
+        let order = try run(networkSetup, ["-listnetworkserviceorder"], timeout: 4)
+        var candidate: String?
+
+        for rawLine in order.split(separator: "\n", omittingEmptySubsequences: false) {
+            let line = String(rawLine).trimmingCharacters(in: .whitespacesAndNewlines)
+            if line.hasPrefix("("),
+               let closing = line.firstIndex(of: ")"),
+               Int(line[line.index(after: line.startIndex)..<closing]) != nil
+            {
+                var name = line[line.index(after: closing)...]
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if name.hasPrefix("*") { name.removeFirst() }
+                candidate = name
+            } else if line.contains("Device: \(interface))"), let candidate {
+                return candidate
+            }
+        }
+
+        throw TailscaleError("Could not match \(interface) to a network service")
+    }
+
+    private static func automaticProxySetting(
+        for service: String
+    ) throws -> AutomaticProxySetting {
+        let output = try run(networkSetup, ["-getautoproxyurl", service], timeout: 4)
+        var url: String?
+        var enabled = false
+
+        for rawLine in output.split(separator: "\n") {
+            let line = String(rawLine)
+            if line.hasPrefix("URL:") {
+                let value = line.dropFirst(4).trimmingCharacters(in: .whitespacesAndNewlines)
+                if value != "(null)", !value.isEmpty { url = value }
+            } else if line.hasPrefix("Enabled:") {
+                enabled = line.dropFirst(8)
+                    .trimmingCharacters(in: .whitespacesAndNewlines) == "Yes"
+            }
+        }
+
+        return AutomaticProxySetting(url: url, enabled: enabled)
+    }
+
+    private static func isOurPAC(_ value: String) -> Bool {
+        if value == pacURL { return true }
+        guard let url = URL(string: value), url.isFileURL else { return false }
+        return url.standardizedFileURL.path == pacFileURL.standardizedFileURL.path
+    }
+
+    private static func run(
+        _ executable: String,
+        _ arguments: [String],
+        timeout: TimeInterval
+    ) throws -> String {
+        let process = Process()
+        let output = Pipe()
+        let errors = Pipe()
+        let finished = DispatchSemaphore(value: 0)
+
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        process.standardOutput = output
+        process.standardError = errors
+        process.terminationHandler = { _ in finished.signal() }
+
+        try process.run()
+        if finished.wait(timeout: .now() + timeout) == .timedOut {
+            process.terminate()
+            _ = finished.wait(timeout: .now() + 1)
+            throw TailscaleError("Home browser routing command timed out")
+        }
+
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        guard process.terminationStatus == 0 else {
+            let message = String(
+                decoding: errors.fileHandleForReading.readDataToEndOfFile(),
+                as: UTF8.self
+            ).trimmingCharacters(in: .whitespacesAndNewlines)
+            throw TailscaleError(
+                message.isEmpty ? "Home browser routing is unavailable" : message
+            )
+        }
+
+        return String(decoding: data, as: UTF8.self)
+    }
+}
+
+private struct AutomaticProxySetting {
+    let url: String?
+    let enabled: Bool
 }
 
 private struct TailscaleSnapshot: Sendable {
